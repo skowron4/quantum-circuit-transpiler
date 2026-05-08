@@ -55,7 +55,7 @@ public:
 
             if (p1 > prob_2q) {
                 // Generuj bramkę 1-kubitową (bez udziału rezonatora, lokalna na kubicie)
-                circuit.push_back({"1Q", dist_q(rng), -1});
+                circuit.push_back({i, "1Q", dist_q(rng), -1});
             } else {
                 double p2 = dist_prob(rng);
 
@@ -72,10 +72,10 @@ public:
                         int q2 = q_list[dist_local_q(rng)];
                         while(q1 == q2) q2 = q_list[dist_local_q(rng)]; // Upewnij się, że są różne
 
-                        circuit.push_back({"2Q_LOCAL", q1, q2});
+                        circuit.push_back({i,"2Q_LOCAL", q1, q2});
                     } else {
                         // Fallback, jeśli rezonator ma tylko 1 kubit (nie powinno wystąpić w zdrowej siatce)
-                        circuit.push_back({"1Q", dist_q(rng), -1});
+                        circuit.push_back({i,"1Q", dist_q(rng), -1});
                     }
                 } else {
                     // BRAMKA 2Q GLOBALNA (Między-gwiazdowa - wymusi router i SWAPy)
@@ -87,7 +87,7 @@ public:
                         q1 = dist_q(rng);
                         q2 = dist_q(rng);
                     }
-                    circuit.push_back({"2Q_GLOBAL", q1, q2});
+                    circuit.push_back({i,"2Q_GLOBAL", q1, q2});
                 }
             }
         }
@@ -160,6 +160,55 @@ public:
             std::cout << lines[i].str() << "\n";
         }
         std::cout << "======================================\n\n";
+    }
+
+    void CircuitGenerator::link_gates(std::vector<Gate>& circuit) {
+        // 1. Resetujemy wszystkie wskaźniki (na wypadek ponownego przeliczania)
+        for (auto& g : circuit) {
+            g.prev_gate_q1 = g.prev_gate_q2 = nullptr;
+            g.next_gate_q1 = g.next_gate_q2 = nullptr;
+        }
+
+        // 2. Mapa: ID qubitu -> wskaźnik na ostatnią bramkę, która go użyła
+        std::vector<Gate*> last_gate_on_qubit(this->num_qubits, nullptr);
+
+        for (int i = 0; i < circuit.size(); ++i) {
+            Gate* current = &circuit[i];
+
+            // --- OBSŁUGA QUBITU 1 (zawsze obecny) ---
+            if (last_gate_on_qubit[current->target_q1] != nullptr) {
+                Gate* prev = last_gate_on_qubit[current->target_q1];
+
+                // Ustawiamy wstecz w bieżącej
+                current->prev_gate_q1 = prev;
+
+                // Ustawiamy w przód w poprzedniej (sprawdzamy na którym qubicie była poprzednia)
+                if (prev->target_q1 == current->target_q1) {
+                    prev->next_gate_q1 = current;
+                } else {
+                    prev->next_gate_q2 = current;
+                }
+            }
+            last_gate_on_qubit[current->target_q1] = current;
+
+            // --- OBSŁUGA QUBITU 2 (tylko dla bramek 2Q) ---
+            if (current->type != "1Q" && current->target_q2 != -1) {
+                if (last_gate_on_qubit[current->target_q2] != nullptr) {
+                    Gate* prev = last_gate_on_qubit[current->target_q2];
+
+                    // Ustawiamy wstecz w bieżącej
+                    current->prev_gate_q2 = prev;
+
+                    // Ustawiamy w przód w poprzedniej
+                    if (prev->target_q1 == current->target_q2) {
+                        prev->next_gate_q1 = current;
+                    } else {
+                        prev->next_gate_q2 = current;
+                    }
+                }
+                last_gate_on_qubit[current->target_q2] = current;
+            }
+        }
     }
 };
 

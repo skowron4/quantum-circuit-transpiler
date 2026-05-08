@@ -72,7 +72,7 @@
 
 int main() {
     // 1. Inicjalizacja Topologii (dziala tak samo dla prostokata i dla trojkata)
-    IQMConstellation qpu(3, 3);
+    auto qpu = IQMConstellation(3,3);
     qpu.print_stats();
 
     // 2. Inicjalizacja Generatora (podpinamy go pod wygenerowana topologie)
@@ -85,6 +85,7 @@ int main() {
 
     cout << "\n--- Generowanie Obwodu Kwantowego ---" << endl;
     vector<Gate> my_circuit = generator.generate(TOTAL_GATES, PROB_2Q, PROB_GLOBAL);
+    generator.link_gates(my_circuit);
 
     // 4. Analiza wygenerowanego obwodu
     int swap_needed = 0;
@@ -104,6 +105,9 @@ int main() {
     cout << "\nPodsumowanie: Wygenerowano " << swap_needed << " bramek wymagajacych kompilacji i SWAPow." << endl;
 
     generator.print_circuit(my_circuit);
+
+    int i = 1;
+    cout << my_circuit[i].id << ": " << my_circuit[i].type << " na Q_" << my_circuit[i].target_q1 << ", na Q_" << my_circuit[i].target_q2 << " prev1 " <<my_circuit[i].prev_gate_q1 << " prev2 " <<my_circuit[i].prev_gate_q2<< " next1 " <<my_circuit[i].next_gate_q1<< " next2 " <<my_circuit[i].next_gate_q2<< endl;
 
     return 0;
 }
