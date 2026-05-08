@@ -9,7 +9,8 @@
 #include <vector>
 #include <set>
 #include <map>
-#include "IQMConstellation.h"
+#include "structures/Qubit.h"
+#include "structures/Resonator.h"
 
 using namespace std;
 
@@ -151,7 +152,7 @@ public:
         return path;
     }
 
-    void print_detailed_stats() const {
+    void print_stats() const {
         cout << "--- Statystyki QPU (Toy Model 3-Rezonatory) ---" << endl;
         cout << "Liczba Rezonatorów: " << resonators.size() << endl;
         cout << "Calkowita Liczba Kubitów: " << qubits.size() << endl;

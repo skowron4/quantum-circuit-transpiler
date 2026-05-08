@@ -13,13 +13,14 @@
 #include <vector>
 #include <climits>
 #include "IQMConstellation.h"
+#include "structures/Gate.h"
 
-// Reprezentacja pojedynczej bramki w obwodzie
-struct Gate {
-    std::string type;     // "1Q", "2Q_LOCAL", "2Q_GLOBAL"
-    int target_q1;
-    int target_q2;   // -1 dla bramek 1-kubitowych
-};
+// // Reprezentacja pojedynczej bramki w obwodzie
+// struct Gate {
+//     std::string type;     // "1Q", "2Q_LOCAL", "2Q_GLOBAL"
+//     int target_q1;
+//     int target_q2;   // -1 dla bramek 1-kubitowych
+// };
 
 class CircuitGenerator {
 private:

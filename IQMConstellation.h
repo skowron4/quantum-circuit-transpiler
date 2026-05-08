@@ -12,21 +12,23 @@
 #include <map>
 #include <queue>
 #include <algorithm>
+#include "structures/Qubit.h"
+#include "structures/Resonator.h"
 
 using namespace std;
 
 // Struktura reprezentująca Kubit (połączony z 1, 2 lub 3 rezonatorami)
-struct Qubit {
-    int id;
-    set<int> connected_resonators;
-};
+// struct Qubit {
+//     int id;
+//     set<int> connected_resonators;
+// };
 
 // Struktura reprezentująca Rezonator / Gwiazdę
-struct Resonator {
-    int id;
-    int y, x;
-    set<int> connected_qubits;
-};
+// struct Resonator {
+//     int id;
+//     int y, x;
+//     set<int> connected_qubits;
+// };
 
 class IQMConstellation {
 private:
