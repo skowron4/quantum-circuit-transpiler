@@ -120,6 +120,15 @@ public:
                 }
             }
         }
+        for (auto& res : resonators) {
+            while (res.connected_qubits.size() < 6) {
+                int new_q_id = qubits.size();
+                set<int> res_group = {res.id}; // Kubit połączony tylko z tym konkretnym rezonatorem
+
+                qubits.push_back({new_q_id, res_group});
+                res.connected_qubits.insert(new_q_id);
+            }
+        }
     }
 
     vector<int> get_shared_qubits(int res1_id, int res2_id) const {
@@ -155,15 +164,31 @@ public:
     }
 
     void print_stats() const {
-        cout << "--- Statystyki QPU ---" << endl;
+        cout << "--- Statystyki QPU (Toy Model 3-Rezonatory) ---" << endl;
         cout << "Liczba Rezonatorów: " << resonators.size() << endl;
-        cout << "Liczba Kubitów: " << qubits.size() << endl;
-        cout << "Macierze odleglosci i routingu zainicjalizowane." << endl;
+        cout << "Calkowita Liczba Kubitów: " << qubits.size() << endl;
+
+        vector<int> shared_by_3, shared_by_2, shared_by_1;
+
+        for (const auto& q : qubits) {
+            if (q.connected_resonators.size() == 3) shared_by_3.push_back(q.id);
+            else if (q.connected_resonators.size() == 2) shared_by_2.push_back(q.id);
+            else if (q.connected_resonators.size() == 1) shared_by_1.push_back(q.id);
+        }
+
+        cout << "\nPodzial Kubitów ze wzgledu na ilosc polaczen:" << endl;
+        cout << " - Polaczone z 3 rezonatorami (Centralne): " << shared_by_3.size() << " (ID: ";
+        for(int id : shared_by_3) cout << id << " "; cout << ")" << endl;
+
+        cout << " - Polaczone z 2 rezonatorami (Wewnetrzne Krawedzie): " << shared_by_2.size() << endl;
+        cout << " - Polaczone z 1 rezonatorem (Brzegowe): " << shared_by_1.size() << endl;
     }
+
 
     int get_num_qubits() const { return qubits.size(); }
     const vector<Resonator>& get_resonators() const { return resonators; }
 };
+
 
 
 #endif //MAGISTERKA_IQMCONSTELLATION_H

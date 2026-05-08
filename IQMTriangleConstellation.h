@@ -109,6 +109,20 @@ public:
                 res.connected_qubits.insert(qubit_map[res_group]);
             }
         }
+
+        // --- DODANY KOD: Uzupełnianie do 6 kubitów (brzegowe) ---
+        // Po wygenerowaniu współdzielonych połączeń, sprawdzamy każdy rezonator
+        // i dodajemy unikalne kubity brzegowe (należące tylko do 1 rezonatora)
+        // tak długo, aż dany rezonator będzie miał dokładnie 6 obsługiwanych kubitów.
+        for (auto& res : resonators) {
+            while (res.connected_qubits.size() < 6) {
+                int new_q_id = qubits.size();
+                set<int> res_group = {res.id}; // Kubit połączony tylko z tym konkretnym rezonatorem
+
+                qubits.push_back({new_q_id, res_group});
+                res.connected_qubits.insert(new_q_id);
+            }
+        }
     }
 
     vector<int> get_shared_qubits(int res1_id, int res2_id) const {
@@ -161,6 +175,5 @@ public:
     int get_num_qubits() const { return qubits.size(); }
     const vector<Resonator>& get_resonators() const { return resonators; }
 };
-
 
 #endif //MAGISTERKA_IQMTRIANGLECONSTELLATION_H
