@@ -1,12 +1,38 @@
-cmake_minimum_required(VERSION 4.0)
-project(magisterka)
+cmake_minimum_required(VERSION 3.31.6)
+project(magisterka LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# --- Zależności (Pakiety) ---
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+find_package(boost_random CONFIG REQUIRED)
+find_package(boost_align CONFIG REQUIRED)
+find_package(fmt CONFIG REQUIRED)
+find_package(absl CONFIG REQUIRED)
 
-add_executable(magisterka main.cpp
+# --- Biblioteka Interfejsowa (Twoje zależności) ---
+add_library(project_deps INTERFACE)
+
+target_link_libraries(project_deps INTERFACE
+        OpenMP::OpenMP_CXX
+        Boost::random
+        Boost::align
+        fmt::fmt-header-only
+        absl::linked_hash_set
+)
+
+target_include_directories(project_deps INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# --- Plik Wykonywalny ---
+set(SOURCES
+        main.cpp
         architecture/IQMConstellation.cpp
         architecture/IQMConstellation.h
         architecture/IQMTriangleConstellation.cpp
         architecture/IQMTriangleConstellation.h
         Generator/CircuitGenerator.cpp
-        Generator/CircuitGenerator.h)
+        Generator/CircuitGenerator.h
+)
+
+add_executable(magisterka ${SOURCES})
+
+# Podpięcie zależności do projektu
+target_link_libraries(magisterka PRIVATE project_deps)
