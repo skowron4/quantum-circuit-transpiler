@@ -1,8 +1,8 @@
 #include <iostream>
 
-#include "CircuitGenerator.h"
-#include "IQMConstellation.h"
-#include "IQMTriangleConstellation.h"
+#include "generator/CircuitGenerator.h"
+#include "architecture/IQMConstellation.h"
+#include "architecture/IQMTriangleConstellation.h"
 
 // int main() {
 //     std::cout << "Hello, World!" << std::endl;
@@ -72,7 +72,8 @@
 
 int main() {
     // 1. Inicjalizacja Topologii (dziala tak samo dla prostokata i dla trojkata)
-    auto qpu = IQMConstellation(3,3);
+    // auto qpu = IQMConstellation(3,3);
+    auto qpu = IQMTriangleConstellation();
     qpu.print_stats();
 
     // 2. Inicjalizacja Generatora (podpinamy go pod wygenerowana topologie)
@@ -106,7 +107,7 @@ int main() {
 
     generator.print_circuit(my_circuit);
 
-    int i = 1;
+    int i = 0;
     cout << my_circuit[i].id << ": " << my_circuit[i].type << " na Q_" << my_circuit[i].target_q1 << ", na Q_" << my_circuit[i].target_q2 << " prev1 " <<my_circuit[i].prev_gate_q1 << " prev2 " <<my_circuit[i].prev_gate_q2<< " next1 " <<my_circuit[i].next_gate_q1<< " next2 " <<my_circuit[i].next_gate_q2<< endl;
 
     return 0;

@@ -12,8 +12,8 @@
 #include <map>
 #include <queue>
 #include <algorithm>
-#include "structures/Qubit.h"
-#include "structures/Resonator.h"
+#include "../structures/Qubit.h"
+#include "../structures/Resonator.h"
 
 using namespace std;
 

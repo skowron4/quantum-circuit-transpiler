@@ -4,9 +4,9 @@ project(magisterka)
 set(CMAKE_CXX_STANDARD 17)
 
 add_executable(magisterka main.cpp
-        IQMConstellation.cpp
-        IQMConstellation.h
-        IQMTriangleConstellation.cpp
-        IQMTriangleConstellation.h
-        CircuitGenerator.cpp
-        CircuitGenerator.h)
+        architecture/IQMConstellation.cpp
+        architecture/IQMConstellation.h
+        architecture/IQMTriangleConstellation.cpp
+        architecture/IQMTriangleConstellation.h
+        Generator/CircuitGenerator.cpp
+        Generator/CircuitGenerator.h)

@@ -12,8 +12,8 @@
 #include <iostream>
 #include <vector>
 #include <climits>
-#include "IQMConstellation.h"
-#include "structures/Gate.h"
+#include "../architecture/IQMConstellation.h"
+#include "../structures/Gate.h"
 
 // // Reprezentacja pojedynczej bramki w obwodzie
 // struct Gate {
@@ -162,7 +162,7 @@ public:
         std::cout << "======================================\n\n";
     }
 
-    void CircuitGenerator::link_gates(std::vector<Gate>& circuit) {
+    void link_gates(std::vector<Gate>& circuit) {
         // 1. Resetujemy wszystkie wskaźniki (na wypadek ponownego przeliczania)
         for (auto& g : circuit) {
             g.prev_gate_q1 = g.prev_gate_q2 = nullptr;
