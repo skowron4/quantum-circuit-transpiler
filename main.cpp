@@ -1,86 +1,29 @@
 #include <iostream>
+#include <memory>
 
 #include "generator/CircuitGenerator.h"
 #include "architecture/IQMConstellation.h"
+#include "geneticAlgorithm/toSort/swap_evaluator.hpp"
 #include "architecture/IQMTriangleConstellation.h"
+#include "fmt/ranges.h"
+#include "geneticAlgorithm/toSort/gate_mute.hpp"
+#include "geneticAlgorithm/toSort/resonator_mute.hpp"
+#include "geneticAlgorithm/toSort/resonator_gate_mute.hpp"
+#include "geneticAlgorithm/toSort/ox_pair.hpp"
+#include  "geneticAlgorithm/genetic_algorithm.hpp"
+#include "geneticAlgorithm/toSort/tournament.hpp"
 
-// int main() {
-//     std::cout << "Hello, World!" << std::endl;
-//     return 0;
-// }
-
-// int main() {
-//     // Inicjalizacja modelu z 3 rezonatorami
-//     IQMTriangleConstellation qpu_triangle;
-//
-//     // Wypisanie statystyk, aby udowodnić liczbę poszczególnych typów kubitów
-//     qpu_triangle.print_detailed_stats();
-//
-//     int start_node = 0;
-//     int target_node = 2;
-//
-//     // O(1) zapytanie o koszt
-//     int cost = qpu_triangle.get_swap_cost(start_node, target_node);
-//     cout << "\nKoszt SWAP z Res 0 do Res 2: " << cost << " skok(ów)\n" << endl;
-//
-//     // Pobranie dostepnych kubitów dla tego skoku
-//     vector<int> swap_qubits = qpu_triangle.get_shared_qubits(start_node, target_node);
-//     cout << "Dostepne kubity umozliwiajace skok Res 0 -> Res 2 (" << swap_qubits.size() << " opcje):" << endl;
-//     for (int q : swap_qubits) {
-//         cout << " -> Kubit ID " << q << endl;
-//     }
-//
-//     return 0;
-// }
-
-// int main() {
-//     int Y = 3;
-//     int X = 3;
-//     IQMConstellation qpu(Y, X);
-//
-//     qpu.print_stats();
-//
-//     int start_node = 0;
-//     int target_node = 8;
-//
-//     // O(1) zapytanie o koszt
-//     int cost = qpu.get_swap_cost(start_node, target_node);
-//     cout << "\nMinimalna liczba skokow (koszt SWAP): " << cost << endl;
-//
-//     // Błyskawiczne odtworzenie ścieżki
-//     vector<int> path = qpu.get_resonator_path(start_node, target_node);
-//
-//     if (path.empty()) {
-//         cout << "Sciezka nie istnieje!" << endl;
-//     } else {
-//         cout << "Trasa zrekonstruowana! Skoki:\n";
-//         for (size_t i = 0; i < path.size() - 1; ++i) {
-//             int r_from = path[i];
-//             int r_to = path[i+1];
-//
-//             vector<int> swap_qubits = qpu.get_shared_qubits(r_from, r_to);
-//
-//             cout << "Skok " << i+1 << ": Res " << r_from << " -> Res " << r_to << " | "
-//                  << "Dostepne kubity do SWAP (" << swap_qubits.size() << "): ";
-//             for (int q : swap_qubits) cout << "Q_" << q << " ";
-//             cout << endl;
-//         }
-//     }
-//
-//     return 0;
-// }
 
 int main() {
     // 1. Inicjalizacja Topologii (dziala tak samo dla prostokata i dla trojkata)
     // auto qpu = IQMConstellation(3,3);
     auto qpu = IQMTriangleConstellation();
     qpu.print_stats();
-
     // 2. Inicjalizacja Generatora (podpinamy go pod wygenerowana topologie)
     CircuitGenerator generator(qpu.get_num_qubits(), qpu.get_resonators(), 1234);
 
     // 3. Konfiguracja parametrów obwodu
-    int TOTAL_GATES = 20;
+    int TOTAL_GATES = 100;
     double PROB_2Q = 0.6;        // 60% szans, że bramka jest 2-kubitowa
     double PROB_GLOBAL = 0.4;    // Z tych 60%, jest 40% szans że to brmaka miedzy gwiazdami (wymaga SWAP)
 
@@ -109,6 +52,78 @@ int main() {
 
     int i = 0;
     cout << my_circuit[i].id << ": " << my_circuit[i].type << " na Q_" << my_circuit[i].target_q1 << ", na Q_" << my_circuit[i].target_q2 << " prev1 " <<my_circuit[i].prev_gate_q1 << " prev2 " <<my_circuit[i].prev_gate_q2<< " next1 " <<my_circuit[i].next_gate_q1<< " next2 " <<my_circuit[i].next_gate_q2<< endl;
+
+    // Gate g1 = {0, "1Q", 1, -1};
+    // Gate g2 = {1, "2Q_LOCAL", 0, 2};
+    // Gate g3 = {2, "1Q", 2, -1};
+    //
+    // g2.next_gate_q2 = &g3;
+    // g3.prev_gate_q1 = &g2;
+    //
+    // auto gates = std::vector<Gate>{g1,g2,g3};
+    // auto x = std::vector<std::pair<int,int>>{{0,1},{1,1},{2,1},{3,1}};
+    // auto xc = std::vector<std::pair<int,int>>{{0,1},{1,1},{2,1},{3,1}};
+    // auto y = std::vector<std::pair<int,int>>{{3,2},{2,2},{1,2},{0,2}};
+    // auto yc = std::vector<std::pair<int,int>>{{3,2},{2,2},{1,2},{0,2}};
+
+    auto evaluator = std::make_shared<metah::SwapEvaluator>(my_circuit, qpu.resonators, qpu.qubits);
+    // auto mutateRes = std::make_unique<metah::ResonatorMute<>>(0.5, qpu.resonators.size());
+    // auto mutateGate = std::make_unique<metah::GateMute<>>(1, gates);
+    auto mutateResGate = std::make_unique<metah::ResonatorGateMute<>>(0.05, 0.1, qpu.resonators.size(), my_circuit);
+    auto ox = std::make_unique<metah::ox_pair<>>(0.7);
+    auto tournament = std::make_unique<metah::Tournament<uint64_t>>(5);
+
+    metah::GeneticAlgorithm<std::vector<std::pair<int,int>>, uint64_t> ga(
+        evaluator,
+        200,
+        6000 ,
+        4,
+        std::move(tournament),
+        std::move(ox),
+        std::move(mutateResGate)
+    );
+
+
+    ga.run();
+    auto [repr, score] = ga.getBest();
+    fmt::println("Best solution: {} with score {}", repr, score);
+
+    // fmt::println("gates {}",evaluator->gates);
+    // fmt::println("resonators {}",evaluator->resonators);
+    // fmt::println("gate_map {}",evaluator->gate_map);
+    // fmt::println("locations {}",evaluator->locations);
+    // fmt::println("loc_adj {}",evaluator->loc_adj);
+    // fmt::println("path_cache {}",evaluator->path_cache);
+    // fmt::println("initial_lq_to_loc {}",evaluator->initial_lq_to_loc);
+
+    // fmt::println("evaluate {}", evaluator->evaluate(x));
+    // fmt::println("repres {}", x);
+
+    // fmt::println("muteRes {}", mutateRes->mutate(x));
+    // fmt::println("repres {}", x);
+    // fmt::println("muteRes {}", mutateRes->mutate(x));
+    // fmt::println("repres {}", x);
+
+    // fmt::println("muteGate {}", mutateGate->mutate(x));
+    // fmt::println("repres {}", x);
+    // fmt::println("muteGate {}", mutateGate->mutate(x));
+    // fmt::println("repres {}", x);
+
+    // fmt::println("muteResGate {}", mutateResGate->mutate(x));
+    // fmt::println("repres {}", x);
+    // fmt::println("muteResGate {}", mutateResGate->mutate(x));
+    // fmt::println("repres {}", x);
+
+    // fmt::println("muteResGate {}", ox->cross(x,y,xc,yc));
+    // fmt::println("repres x {}", x);
+    // fmt::println("repres y {}", y);
+    // fmt::println("repres xc {}", xc);
+    // fmt::println("repres yc {}", yc);
+    // fmt::println("muteResGate {}", ox->cross(xc,yc,x,y));
+    // fmt::println("repres x {}", xc);
+    // fmt::println("repres y {}", yc);
+    // fmt::println("repres xc {}", x);
+    // fmt::println("repres yc {}", y);
 
     return 0;
 }

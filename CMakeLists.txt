@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.31.6)
+cmake_minimum_required(VERSION 3.25)
 project(magisterka LANGUAGES CXX)
 
 # --- Zależności (Pakiety) ---
@@ -30,6 +30,12 @@ set(SOURCES
         architecture/IQMTriangleConstellation.h
         Generator/CircuitGenerator.cpp
         Generator/CircuitGenerator.h
+        geneticAlgorithm/toSort/swap_evaluator.hpp
+        structures/physical_qubit.hpp
+        geneticAlgorithm/toSort/resonator_mute.hpp
+        geneticAlgorithm/toSort/gate_mute.hpp
+        geneticAlgorithm/toSort/resonator_gate_mute.hpp
+        geneticAlgorithm/toSort/ox_pair.hpp
 )
 
 add_executable(magisterka ${SOURCES})
