@@ -15,10 +15,11 @@
 using namespace std;
 
 class IQMTriangleConstellation {
-private:
+public:
     vector<Resonator> resonators;
     vector<Qubit> qubits;
 
+private:
     map<set<int>, int> qubit_map;
     map<pair<int, int>, int> coord_to_id; // Mapa wspolrzednych do ID rezonatora
 

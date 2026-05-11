@@ -31,10 +31,12 @@ using namespace std;
 // };
 
 class IQMConstellation {
-private:
-    int Y_rows, X_cols;
+public:
     vector<Resonator> resonators;
     vector<Qubit> qubits;
+
+private:
+    int Y_rows, X_cols;
 
     map<set<int>, int> qubit_map;
 
