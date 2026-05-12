@@ -36,6 +36,7 @@ set(SOURCES
         geneticAlgorithm/toSort/gate_mute.hpp
         geneticAlgorithm/toSort/resonator_gate_mute.hpp
         geneticAlgorithm/toSort/ox_pair.hpp
+        structures/swap_record.hpp
 )
 
 add_executable(magisterka ${SOURCES})

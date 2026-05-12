@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../templates/problem.hpp"
 #include "../rng.hpp"
@@ -14,6 +15,9 @@
 #include "structures/Resonator.h"
 #include "structures/Gate.h"
 #include "structures/physical_qubit.hpp"
+#include "structures/swap_record.hpp"
+
+
 namespace metah {
     class SwapEvaluator final : public metah::Problem<std::vector<std::pair<int, int>>, uint64_t> {
     public:
@@ -154,11 +158,119 @@ namespace metah {
         [[nodiscard]] std::vector<std::pair<int, int>> random_repr(metah::ThreadLocalRandom& rng) const override {
             std::vector<std::pair<int, int>> repr;
             repr.reserve(gates.size());
-            std::uniform_int_distribution<size_t> dist(0, resonators.size() - 1);
+            std::unordered_set<int> completed_gates;
+            std::vector<const Gate*> available_gates;
+
             for (const auto& gate : gates) {
-                repr.emplace_back(gate.id, resonators[dist(rng.randomEngine())].id);
+                if (gate.prev_gate_q1 == nullptr && gate.prev_gate_q2 == nullptr) {
+                    available_gates.push_back(&gate);
+                }
             }
+
+            std::uniform_int_distribution<size_t> res_dist(0, resonators.size() - 1);
+
+            auto is_ready = [&](const Gate* g) {
+                if (!g) return false;
+                if (g->prev_gate_q1 && completed_gates.find(g->prev_gate_q1->id) == completed_gates.end()) return false;
+                if (g->prev_gate_q2 && completed_gates.find(g->prev_gate_q2->id) == completed_gates.end()) return false;
+                return true;
+            };
+
+            while (!available_gates.empty()) {
+                size_t idx = rng.random_idx(available_gates.size() - 1);
+                const Gate* current = available_gates[idx];
+
+                std::swap(available_gates[idx], available_gates.back());
+                available_gates.pop_back();
+
+                int random_resonator_id = resonators[res_dist(rng.randomEngine())].id;
+                repr.emplace_back(current->id, random_resonator_id);
+                completed_gates.insert(current->id);
+
+                if (current->next_gate_q1 && is_ready(current->next_gate_q1)) {
+                    available_gates.push_back(current->next_gate_q1);
+                }
+
+                if (current->next_gate_q2 && current->next_gate_q2 != current->next_gate_q1) {
+                    if (is_ready(current->next_gate_q2)) {
+                        available_gates.push_back(current->next_gate_q2);
+                    }
+                }
+            }
+
             return repr;
+        }
+
+        //TODO
+        [[nodiscard]] std::vector<SwapRecord> evaluate_and_track_swaps(const std::vector<std::pair<int, int>>& repr) const /* override - jeśli tworzysz nową wirtualną */ {
+            std::vector<SwapRecord> swap_history;
+
+            // Kopiujemy stan początkowy mapowania dla każdego wywołania
+            std::unordered_map<int, int> lq_to_loc = initial_lq_to_loc;
+
+            // Odwrotne mapowanie: loc_id -> lq_id (potrzebne do swapów)
+            std::unordered_map<int, int> loc_to_lq;
+            for (const auto& [lq, loc] : lq_to_loc) {
+                loc_to_lq[loc] = lq;
+            }
+
+            // Zmodyfikowana lambda - teraz przyjmuje ID aktualnej bramki zamiast referencji do kosztu
+            auto apply_swaps = [&](const std::vector<int>& path, int current_gate_id) {
+                if (path.empty() || path.size() == 1) return;
+
+                if (path[0] == -1) {
+                    // Tutaj w zależności od potrzeb możesz wrzucić do wektora jakiś błąd,
+                    // rzucić wyjątek lub po prostu zignorować.
+                    printf("KURWAAAAAAAAAAAAAAA\n");
+                    return;
+                }
+
+                // Przechodzimy po fizycznej ścieżce i zamieniamy miejscami kubity logiczne
+                for (size_t i = 0; i < path.size() - 1; ++i) {
+                    int loc1 = path[i];
+                    int loc2 = path[i+1];
+
+                    int lq1 = loc_to_lq[loc1];
+                    int lq2 = loc_to_lq[loc2];
+
+                    // Rejestrujemy wykonany swap
+                    swap_history.push_back({current_gate_id, lq1, lq2, loc1, loc2});
+
+                    // Zamiana mapowań
+                    lq_to_loc[lq1] = loc2;
+                    lq_to_loc[lq2] = loc1;
+                    loc_to_lq[loc1] = lq2;
+                    loc_to_lq[loc2] = lq1;
+                }
+            };
+
+            for (const auto& [gate_id, res_id] : repr) {
+                const auto& gate = gate_map.at(gate_id);
+
+                if (gate.type == "2Q_LOCAL" || gate.type == "2Q_GLOBAL") {
+                    int lq1 = gate.target_q1;
+                    int lq2 = gate.target_q2;
+
+                    // Gdzie fizycznie znajdują się teraz te kubity?
+                    int loc1 = lq_to_loc[lq1];
+                    int loc2 = lq_to_loc[lq2];
+
+                    // Ścieżka dla pierwszego kubita
+                    uint64_t key1 = make_cache_key(loc1, res_id, loc2);
+                    const auto& path1 = path_cache.at(key1);
+                    apply_swaps(path1, gate_id);
+
+                    // Zaktualizowana lokalizacja pierwszego kubita (bo mógł wykonać swapy)
+                    loc1 = lq_to_loc[lq1];
+
+                    // Ścieżka dla drugiego kubita
+                    uint64_t key2 = make_cache_key(loc2, res_id, loc1);
+                    const auto& path2 = path_cache.at(key2);
+                    apply_swaps(path2, gate_id);
+                }
+            }
+
+            return swap_history;
         }
 
     private:
@@ -210,5 +322,6 @@ namespace metah {
         }
     };
 }
+
 
 #endif //SWAP_EVALUATOR_HPP

@@ -23,9 +23,11 @@ struct fmt::formatter<Resonator> {
     auto format(const Resonator& q, FormatContext& ctx) const {
         return fmt::format_to(
             ctx.out(),
-            "resonator(id={}, qubit={})",
+            "resonator(id={}, qubit={}, x={}, y={})",
             q.id,
-            q.connected_qubits
+            q.connected_qubits,
+            q.x,
+            q.y
         );
     }
 };

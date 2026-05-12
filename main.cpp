@@ -23,8 +23,8 @@ int main() {
     CircuitGenerator generator(qpu.get_num_qubits(), qpu.get_resonators(), 1234);
 
     // 3. Konfiguracja parametrów obwodu
-    int TOTAL_GATES = 100;
-    double PROB_2Q = 0.6;        // 60% szans, że bramka jest 2-kubitowa
+    int TOTAL_GATES = 20;
+    double PROB_2Q = 1;        // 60% szans, że bramka jest 2-kubitowa
     double PROB_GLOBAL = 0.4;    // Z tych 60%, jest 40% szans że to brmaka miedzy gwiazdami (wymaga SWAP)
 
     cout << "\n--- Generowanie Obwodu Kwantowego ---" << endl;
@@ -53,6 +53,10 @@ int main() {
     int i = 0;
     cout << my_circuit[i].id << ": " << my_circuit[i].type << " na Q_" << my_circuit[i].target_q1 << ", na Q_" << my_circuit[i].target_q2 << " prev1 " <<my_circuit[i].prev_gate_q1 << " prev2 " <<my_circuit[i].prev_gate_q2<< " next1 " <<my_circuit[i].next_gate_q1<< " next2 " <<my_circuit[i].next_gate_q2<< endl;
 
+    fmt::println("resonators {}",qpu.resonators);
+    fmt::print("=====================================================\n");
+    fmt::println("qubit {}",qpu.qubits);
+
     // Gate g1 = {0, "1Q", 1, -1};
     // Gate g2 = {1, "2Q_LOCAL", 0, 2};
     // Gate g3 = {2, "1Q", 2, -1};
@@ -75,9 +79,9 @@ int main() {
 
     metah::GeneticAlgorithm<std::vector<std::pair<int,int>>, uint64_t> ga(
         evaluator,
-        200,
+        300,
         6000 ,
-        4,
+        12,
         std::move(tournament),
         std::move(ox),
         std::move(mutateResGate)
@@ -86,6 +90,8 @@ int main() {
 
     ga.run();
     auto [repr, score] = ga.getBest();
+
+    fmt::println("swaps {}", evaluator->evaluate_and_track_swaps(repr));
     fmt::println("Best solution: {} with score {}", repr, score);
 
     // fmt::println("gates {}",evaluator->gates);
