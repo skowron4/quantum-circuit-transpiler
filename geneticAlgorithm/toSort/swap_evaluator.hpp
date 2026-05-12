@@ -167,8 +167,6 @@ namespace metah {
                 }
             }
 
-            std::uniform_int_distribution<size_t> res_dist(0, resonators.size() - 1);
-
             auto is_ready = [&](const Gate* g) {
                 if (!g) return false;
                 if (g->prev_gate_q1 && completed_gates.find(g->prev_gate_q1->id) == completed_gates.end()) return false;
@@ -183,8 +181,7 @@ namespace metah {
                 std::swap(available_gates[idx], available_gates.back());
                 available_gates.pop_back();
 
-                int random_resonator_id = resonators[res_dist(rng.randomEngine())].id;
-                repr.emplace_back(current->id, random_resonator_id);
+                repr.emplace_back(current->id, rng.random_idx(resonators.size() - 1));
                 completed_gates.insert(current->id);
 
                 if (current->next_gate_q1 && is_ready(current->next_gate_q1)) {
