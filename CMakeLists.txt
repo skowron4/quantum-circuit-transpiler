@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(magisterka LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
 
 # --- Zależności (Pakiety) ---
 find_package(OpenMP REQUIRED COMPONENTS CXX)
@@ -43,3 +44,6 @@ add_executable(magisterka ${SOURCES})
 
 # Podpięcie zależności do projektu
 target_link_libraries(magisterka PRIVATE project_deps)
+# Wymuszenie flagi OpenMP dla linkera w MinGW
+target_compile_options(magisterka PRIVATE -fopenmp)
+target_link_options(magisterka PRIVATE -fopenmp)
