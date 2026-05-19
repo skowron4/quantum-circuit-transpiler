@@ -14,19 +14,15 @@
 #include <climits>
 #include "../architecture/IQMConstellation.h"
 #include "../structures/Gate.h"
-
-// // Reprezentacja pojedynczej bramki w obwodzie
-// struct Gate {
-//     std::string type;     // "1Q", "2Q_LOCAL", "2Q_GLOBAL"
-//     int target_q1;
-//     int target_q2;   // -1 dla bramek 1-kubitowych
-// };
+#include "structures/Resonator.h"
 
 class CircuitGenerator {
 private:
-    int num_qubits;
+    const BaseTopology& topo;
+    int num_physical_qubits;
+    int num_logical_qubits; // Dodano: liczba używanych kubitów logicznych
     const std::vector<Resonator>& resonators;
-    std::mt19937 rng; // Generator liczb pseudolosowych (Mersenne Twister)
+    std::mt19937 rng;
 
     // Funkcja pomocnicza: Sprawdza, czy dwa kubity są podpięte pod ten sam rezonator (gwiazdę)
     bool share_resonator(int q1, int q2) {
@@ -40,49 +36,63 @@ private:
 
 public:
     // Konstruktor pobierający dane o topologii
-    CircuitGenerator(int qubits_count, const vector<Resonator>& res, int seed = 42)
-        : num_qubits(qubits_count), resonators(res), rng(seed) {}
+    CircuitGenerator(const BaseTopology& t, int used_logical_qubits, int seed = 42)
+    : topo(t),
+      num_physical_qubits(t.get_num_qubits()),
+      num_logical_qubits(used_logical_qubits),
+      resonators(t.get_resonators()),
+      rng(seed) {
+        // Zabezpieczenie: nie możemy użyć więcej kubitów logicznych niż mamy fizycznych
+        if (num_logical_qubits > num_physical_qubits) {
+            num_logical_qubits = num_physical_qubits;
+        }
+    }
 
     // Główna funkcja generująca obwód
     std::vector<Gate> generate(int num_gates, double prob_2q, double prob_global) {
         std::vector<Gate> circuit;
         std::uniform_real_distribution<double> dist_prob(0.0, 1.0);
-        std::uniform_int_distribution<int> dist_q(0, num_qubits - 1);
+
+        // Losujemy tylko spośród dostępnych kubitów LOGICZNYCH
+        std::uniform_int_distribution<int> dist_q(0, num_logical_qubits - 1);
         std::uniform_int_distribution<int> dist_res(0, resonators.size() - 1);
 
         for (int i = 0; i < num_gates; ++i) {
             double p1 = dist_prob(rng);
 
             if (p1 > prob_2q) {
-                // Generuj bramkę 1-kubitową (bez udziału rezonatora, lokalna na kubicie)
                 circuit.push_back({i, "1Q", dist_q(rng), -1});
             } else {
                 double p2 = dist_prob(rng);
 
                 if (p2 > prob_global) {
-                    // BRAMKA 2Q LOKALNA (Wewnątrz jednej gwiazdy/rezonatora - brak SWAPów)
                     int r_id = dist_res(rng);
                     const auto& connected = resonators[r_id].connected_qubits;
 
                     if (connected.size() >= 2) {
                         std::vector<int> q_list(connected.begin(), connected.end());
-                        std::uniform_int_distribution<int> dist_local_q(0, q_list.size() - 1);
 
-                        int q1 = q_list[dist_local_q(rng)];
-                        int q2 = q_list[dist_local_q(rng)];
-                        while(q1 == q2) q2 = q_list[dist_local_q(rng)]; // Upewnij się, że są różne
+                        // Ograniczamy listę do tych, które mieszczą się w puli logicznej
+                        std::vector<int> valid_q_list;
+                        for (int q : q_list) {
+                            if (q < num_logical_qubits) valid_q_list.push_back(q);
+                        }
 
-                        circuit.push_back({i,"2Q_LOCAL", q1, q2});
+                        if (valid_q_list.size() >= 2) {
+                            std::uniform_int_distribution<int> dist_local_q(0, valid_q_list.size() - 1);
+                            int q1 = valid_q_list[dist_local_q(rng)];
+                            int q2 = valid_q_list[dist_local_q(rng)];
+                            while(q1 == q2) q2 = valid_q_list[dist_local_q(rng)];
+                            circuit.push_back({i,"2Q_LOCAL", q1, q2});
+                        } else {
+                            circuit.push_back({i,"1Q", dist_q(rng), -1});
+                        }
                     } else {
-                        // Fallback, jeśli rezonator ma tylko 1 kubit (nie powinno wystąpić w zdrowej siatce)
                         circuit.push_back({i,"1Q", dist_q(rng), -1});
                     }
                 } else {
-                    // BRAMKA 2Q GLOBALNA (Między-gwiazdowa - wymusi router i SWAPy)
                     int q1 = dist_q(rng);
                     int q2 = dist_q(rng);
-
-                    // Szukaj dopóki kubity są takie same ALBO współdzielą ten sam rezonator
                     while(q1 == q2 || share_resonator(q1, q2)) {
                         q1 = dist_q(rng);
                         q2 = dist_q(rng);
@@ -100,13 +110,20 @@ public:
             return;
         }
 
-        std::vector<std::stringstream> lines(num_qubits);
+        std::vector<std::stringstream> lines(num_physical_qubits);
 
-        // Inicjalizacja nagłówków (q0, q1, ..., q10) z wyrównaniem
-        for (int i = 0; i < num_qubits; ++i) {
+        // Inicjalizacja nagłówków z rozróżnieniem na Logiczne [L] i Puste/Routingowe [E]
+        for (int i = 0; i < num_physical_qubits; ++i) {
             lines[i] << "q";
             if (i < 10) lines[i] << "0"; // Zero padding dla równych linii
-            lines[i] << i << ": ";
+            lines[i] << i;
+
+            // Dodatkowe oznaczenie: czy kubit przechowuje wartość logiczną
+            if (i < num_logical_qubits) {
+                lines[i] << " [L]: ";
+            } else {
+                lines[i] << " [E]: ";
+            }
         }
 
         for (const auto& gate : circuit) {
@@ -125,7 +142,7 @@ public:
 
             // Rysowanie poszczególnych bramek
             if (gate.type == "1Q") {
-                for (int i = 0; i < num_qubits; ++i) {
+                for (int i = 0; i < num_physical_qubits; ++i) {
                     if (i == gate.target_q1) {
                         lines[i] << "-[ U3 ]-";
                     } else {
@@ -143,7 +160,7 @@ public:
                 std::string ctrl_char = (gate.type == "2Q_GLOBAL") ? "--*--" : "--o--";
                 std::string targ_char = (gate.type == "2Q_GLOBAL") ? "-[+]-" : "-(+)-";
 
-                for (int i = 0; i < num_qubits; ++i) {
+                for (int i = 0; i < num_physical_qubits; ++i) {
                     if (i == c) lines[i] << ctrl_char;
                     else if (i == t) lines[i] << targ_char;
                     else if (i > min_q && i < max_q) lines[i] << "--|--";
@@ -154,9 +171,10 @@ public:
 
         // Wydruk końcowy
         std::cout << "\n=== WIZUALIZACJA OBWODU KWANTOWEGO ===\n";
-        std::cout << "Legenda: --o--/-(+)- [Lokalna]  |  --*--/-[+]- [Globalna - wymaga SWAP]\n\n";
+        std::cout << "Oznaczenia kubitów: [L] - Logiczny (Zajęty) | [E] - Pusty (Dostępny dla MOVE)\n";
+        std::cout << "Legenda bramek:   --o--/-(+)- [Lokalna] | --*--/-[+]- [Globalna - wymaga routingu]\n\n";
 
-        for (int i = 0; i < num_qubits; ++i) {
+        for (int i = 0; i < num_physical_qubits; ++i) {
             std::cout << lines[i].str() << "\n";
         }
         std::cout << "======================================\n\n";
@@ -170,7 +188,8 @@ public:
         }
 
         // 2. Mapa: ID qubitu -> wskaźnik na ostatnią bramkę, która go użyła
-        std::vector<Gate*> last_gate_on_qubit(this->num_qubits, nullptr);
+        // Zmiana: używamy num_physical_qubits, aby zabezpieczyć całą przestrzeń sprzętową
+        std::vector<Gate*> last_gate_on_qubit(this->num_physical_qubits, nullptr);
 
         for (int i = 0; i < circuit.size(); ++i) {
             Gate* current = &circuit[i];
@@ -209,6 +228,32 @@ public:
                 last_gate_on_qubit[current->target_q2] = current;
             }
         }
+    }
+
+    void print_gate_statistics(const std::vector<Gate>& circuit) const {
+        int count_1q = 0;
+        int count_2q_local = 0;
+        int count_2q_global = 0;
+
+        for (const auto& gate : circuit) {
+            if (gate.type == "1Q") {
+                count_1q++;
+            } else if (gate.type == "2Q_LOCAL") {
+                count_2q_local++;
+            } else if (gate.type == "2Q_GLOBAL") {
+                count_2q_global++;
+            }
+        }
+
+        int total_2q = count_2q_local + count_2q_global;
+
+        std::cout << "=== STATYSTYKI OBWODU ===\n";
+        std::cout << "Całkowita liczba bramek: " << circuit.size() << "\n";
+        std::cout << "Bramki 1-kubitowe: " << count_1q << "\n";
+        std::cout << "Bramki 2-kubitowe (suma): " << total_2q << "\n";
+        std::cout << "  - Lokalne: " << count_2q_local << "\n";
+        std::cout << "  - Globalne: " << count_2q_global << "\n";
+        std::cout << "=========================\n\n";
     }
 };
 

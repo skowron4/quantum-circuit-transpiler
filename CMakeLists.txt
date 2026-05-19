@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.25)
 project(magisterka LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 
+add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+
 # --- Zależności (Pakiety) ---
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(boost_random CONFIG REQUIRED)
@@ -37,13 +39,19 @@ set(SOURCES
         geneticAlgorithm/toSort/gate_mute.hpp
         geneticAlgorithm/toSort/resonator_gate_mute.hpp
         geneticAlgorithm/toSort/ox_pair.hpp
-        structures/swap_record.hpp
+        structures/routing_record.hpp
+        differentialEvolution/differential_evolution.cpp
+        differentialEvolution/differential_evolution.h
+        architecture/BaseTopology.cpp
+        architecture/BaseTopology.h
 )
 
 add_executable(magisterka ${SOURCES})
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(magisterka PRIVATE /openmp:llvm)
+endif()
 
 # Podpięcie zależności do projektu
 target_link_libraries(magisterka PRIVATE project_deps)
-# Wymuszenie flagi OpenMP dla linkera w MinGW
 target_compile_options(magisterka PRIVATE -fopenmp)
 target_link_options(magisterka PRIVATE -fopenmp)

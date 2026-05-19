@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -15,7 +16,7 @@
 #include "structures/Resonator.h"
 #include "structures/Gate.h"
 #include "structures/physical_qubit.hpp"
-#include "structures/swap_record.hpp"
+#include "structures/routing_record.hpp"
 
 
 namespace metah {
@@ -199,8 +200,8 @@ namespace metah {
         }
 
         //TODO
-        [[nodiscard]] std::vector<SwapRecord> evaluate_and_track_swaps(const std::vector<std::pair<int, int>>& repr) const /* override - jeśli tworzysz nową wirtualną */ {
-            std::vector<SwapRecord> swap_history;
+        [[nodiscard]] std::vector<RoutingRecord> evaluate_and_track_swaps(const std::vector<std::pair<int, int>>& repr) const /* override - jeśli tworzysz nową wirtualną */ {
+            std::vector<RoutingRecord> swap_history;
 
             // Kopiujemy stan początkowy mapowania dla każdego wywołania
             std::unordered_map<int, int> lq_to_loc = initial_lq_to_loc;
@@ -231,7 +232,7 @@ namespace metah {
                     int lq2 = loc_to_lq[loc2];
 
                     // Rejestrujemy wykonany swap
-                    swap_history.push_back({current_gate_id, lq1, lq2, loc1, loc2});
+                    // swap_history.push_back({current_gate_id, lq1, lq2, loc1, loc2});
 
                     // Zamiana mapowań
                     lq_to_loc[lq1] = loc2;
