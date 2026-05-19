@@ -4,6 +4,9 @@ set(CMAKE_CXX_STANDARD 20)
 
 add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
+# 1. WYŁĄCZENIE MAKR MIN/MAX Z WINDOWS.H
+add_compile_definitions(NOMINMAX)
+
 # --- Zależności (Pakiety) ---
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(boost_random CONFIG REQUIRED)
@@ -44,14 +47,18 @@ set(SOURCES
         differentialEvolution/differential_evolution.h
         architecture/BaseTopology.cpp
         architecture/BaseTopology.h
+        greedy/GreedyASAP.cpp
+        greedy/GreedyASAP.h
 )
 
 add_executable(magisterka ${SOURCES})
+
+# 2. POPRAWNA KONFIGURACJA OPENMP DLA MSVC
 if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     target_compile_options(magisterka PRIVATE /openmp:llvm)
 endif()
 
 # Podpięcie zależności do projektu
 target_link_libraries(magisterka PRIVATE project_deps)
-target_compile_options(magisterka PRIVATE -fopenmp)
-target_link_options(magisterka PRIVATE -fopenmp)
+
+# USUNIĘTO: target_compile_options i target_link_options z -fopenmp!

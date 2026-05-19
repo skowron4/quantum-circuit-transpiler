@@ -52,7 +52,7 @@ private:
 public:
     DifferentialEvolution(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name);
 
-    double evaluate_fitness(const std::vector<double>& genes, int& out_swaps, int& out_moves, std::vector<RoutingRecord>* out_log = nullptr);
+    double evaluate_fitness(const std::vector<double>& genes, int& out_swaps, int& out_moves, double &max_physical_time, int &max_logical_depth, std::vector<RoutingRecord>* out_log = nullptr);
     void print_optimized_circuit(const std::vector<RoutingRecord>& log, int num_logical_qubits) const;
     void optimize(int pop_size, int generations, int num_logical_qubits = -1);
 

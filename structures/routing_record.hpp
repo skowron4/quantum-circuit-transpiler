@@ -13,6 +13,8 @@ struct RoutingRecord {
     int lq2;
     int loc1;
     int loc2;
+    int res_used = -1;       // Przekazanie wybranego rezonatora z DE do SWAP/MOVE
+    double start_time = 0.0;
 };
 
 template <>
