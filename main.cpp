@@ -4,6 +4,7 @@
 #include "geneticAlgorithm/toSort/swap_evaluator.hpp"
 #include "architecture/IQMTriangleConstellation.h"
 #include "differentialEvolution/differential_evolution.h"
+#include "sabre/SabreRouter.h"
 #ifdef _WIN32
     #include <windows.h>
 #endif
@@ -21,7 +22,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
     // Generowanie obwodu testowego
-    std::vector<Gate> circuit = generator.generate(50, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(1000, 0.6, 0.4);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
@@ -31,7 +32,11 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
 
     // 2. Wykonanie algorytmu optymalizacyjnego (Differential Evolution)
     DifferentialEvolution de_router(qpu, circuit, qpu.get_num_qubits(), name);
-    de_router.optimize(100, 30000);
+    de_router.optimize(100, 2000000);
+
+    // 3. Wykonanie algorytmu SABRE
+    SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
+    sabre.run_benchmark();
 }
 
 int main() {

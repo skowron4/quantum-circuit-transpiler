@@ -49,6 +49,8 @@ set(SOURCES
         architecture/BaseTopology.h
         greedy/GreedyASAP.cpp
         greedy/GreedyASAP.h
+        sabre/SabreRouter.cpp
+        sabre/SabreRouter.h
 )
 
 add_executable(magisterka ${SOURCES})
