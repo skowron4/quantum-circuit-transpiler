@@ -61,4 +61,22 @@ endif()
 # Podpięcie zależności do projektu
 target_link_libraries(magisterka PRIVATE project_deps)
 
-# USUNIĘTO: target_compile_options i target_link_options z -fopenmp!
+# 1. Wymuś optymalizacje czasu konsolidacji (LTO / IPO) - łączy cały kod z plików .cpp i inlinuje cross-modułowo
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result)
+if(result)
+    set_target_properties(magisterka PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# 2. Agresywne flagi dla profilu Release
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    # /O2 - Max speed, /Ob2 - Aggressive inlining, /arch:AVX2 - wektoryzacja SIMD, /fp:fast - szybsza matma zmiennoprzecinkowa
+    target_compile_options(magisterka PRIVATE
+            "$<$<CONFIG:RELEASE>:/O2;/Ob2;/Oi;/Ot;/arch:AVX2;/fp:fast>"
+    )
+else()
+    # Flagi dla GCC / Clang
+    target_compile_options(magisterka PRIVATE
+            "$<$<CONFIG:RELEASE>:-O3;-march=native;-ffast-math;-funroll-loops>"
+    )
+endif()

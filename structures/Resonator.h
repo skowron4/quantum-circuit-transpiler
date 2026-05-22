@@ -1,13 +1,13 @@
 #ifndef RESONATOR_H
 #define RESONATOR_H
 
-#include <set>
+#include <absl/container/inlined_vector.h>
 
 class Resonator {
 public:
     int id;
     int y, x;
-    std::set<int> connected_qubits;
+    absl::InlinedVector<int, 10> connected_qubits;
 };
 
 #include <fmt/format.h>

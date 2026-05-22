@@ -12,8 +12,15 @@
 #include "differentialEvolution/differential_evolution.h"
 
 
+// Własny super szybki max omijający koszty std::initializer_list
+inline double fast_max(double a, double b) {
+    return (a > b) ? a : b;
+}
+
 class GreedyASAP {
 private:
+    static constexpr int RES_OFFSET = 1000;
+
     const BaseTopology& topo;
     std::vector<GateNode> grouped_nodes;
     std::vector<Gate> original_circuit;
@@ -21,7 +28,6 @@ private:
     std::string name;
 
     void preprocess_circuit(const std::vector<Gate>& circuit) {
-        // Identyczny preprocessing jak w DE
         std::vector<int> last_gate_on_qubit(num_qubits, -1);
         std::vector<int> pending_1q(num_qubits, 0);
         int group_id = 0;
@@ -105,10 +111,10 @@ public:
         auto force_qubit_down = [&](int p, int current_gate_id) {
             if (state.q_on_resonator[p] != -1) {
                 int r = state.q_on_resonator[p];
-                double step_start = std::max(state.q_ready_time[p], state.r_ready_time[r]);
+                double step_start = fast_max(state.q_ready_time[p], state.r_ready_time[r]);
 
                 int lq = state.phys_qubit_to_logical[p];
-                log.push_back({"MOVE", current_gate_id, lq, -1, r + 1000, p, -1, step_start});
+                log.push_back({OpType::MOVE, current_gate_id, lq, -1, r + RES_OFFSET, p, -1, step_start});
 
                 out_moves++;
                 total_routing_cost += MOVE_COST;
@@ -125,7 +131,6 @@ public:
             state.phys_qubit_to_logical[i] = i;
         }
 
-        // Zamiast genów, używamy zwykłej kolejki FIFO/Priorytetowej opartej na ID, aby zachować determinizm
         auto cmp = [](int left, int right) { return left > right; };
         std::priority_queue<int, std::vector<int>, decltype(cmp)> ready_queue(cmp);
 
@@ -145,7 +150,7 @@ public:
             if (node.lq2 == -1) {
                 if (node.q1_1q_count > 0) force_qubit_down(p1, node.id);
                 for (int i = 0; i < node.q1_1q_count; ++i) {
-                    log.push_back({"1Q", node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
+                    log.push_back({OpType::GATE_1Q, node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
                 }
                 state.q_ready_time[p1] += node.q1_1q_count;
                 q_logical_depth[p1] += node.q1_1q_count;
@@ -160,8 +165,8 @@ public:
             if (node.q1_1q_count > 0) force_qubit_down(p1, node.id);
             if (node.lq2 != -1 && node.q2_1q_count > 0) force_qubit_down(p2, node.id);
 
-            for (int i = 0; i < node.q1_1q_count; ++i) log.push_back({"1Q", node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
-            for (int i = 0; i < node.q2_1q_count; ++i) log.push_back({"1Q", node.id, node.lq2, -1, p2, -1, -1, state.q_ready_time[p2] + i});
+            for (int i = 0; i < node.q1_1q_count; ++i) log.push_back({OpType::GATE_1Q, node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
+            for (int i = 0; i < node.q2_1q_count; ++i) log.push_back({OpType::GATE_1Q, node.id, node.lq2, -1, p2, -1, -1, state.q_ready_time[p2] + i});
 
             state.q_ready_time[p1] += node.q1_1q_count;
             state.q_ready_time[p2] += node.q2_1q_count;
@@ -169,15 +174,15 @@ public:
             q_logical_depth[p2] += node.q2_1q_count;
 
             std::vector<int> shared_res;
+            const auto& p2_resonators = topo.qubits[p2].connected_resonators;
             for (int r : topo.qubits[p1].connected_resonators) {
-                if (topo.qubits[p2].connected_resonators.count(r)) shared_res.push_back(r);
+                // ZOPTYMALIZOWANE: Błyskawiczny std::ranges::find zamiast powolnego drzewiastego set::count()
+                if (std::ranges::find(p2_resonators, r) != p2_resonators.end()) shared_res.push_back(r);
             }
 
-            double start_time = std::max(state.q_ready_time[p1], state.q_ready_time[p2]);
+            double start_time = fast_max(state.q_ready_time[p1], state.q_ready_time[p2]);
             int gate_duration = 1;
 
-            // ZACHŁANNA STRATEGIA 1: Kto wchodzi na rezonator?
-            // Wybieramy kubit, który jest gotowy wcześniej (ASAP)
             bool q1_goes_in = (state.q_ready_time[p1] <= state.q_ready_time[p2]);
 
             int p_in = q1_goes_in ? p1 : p2;
@@ -186,8 +191,6 @@ public:
             int lq_stay = q1_goes_in ? node.lq2 : node.lq1;
 
             if (!shared_res.empty()) {
-                // ZACHŁANNA STRATEGIA 2: Który rezonator wybrać?
-                // Wybieramy ten, który zwolni się najszybciej
                 int chosen_res = shared_res[0];
                 double earliest_res_time = state.r_ready_time[chosen_res];
                 for (size_t i = 1; i < shared_res.size(); ++i) {
@@ -202,9 +205,10 @@ public:
 
                 if (state.q_on_resonator[p_in] != chosen_res) {
                     force_qubit_down(p_in, node.id);
-                    start_time = std::max({state.q_ready_time[p_in], state.q_ready_time[p_stay], state.r_ready_time[chosen_res]});
+                    // ZOPTYMALIZOWANE: fast_max niszczy narzut czasowy std::max z initializer_list
+                    start_time = fast_max(state.q_ready_time[p_in], fast_max(state.q_ready_time[p_stay], state.r_ready_time[chosen_res]));
 
-                    log.push_back({"MOVE", node.id, lq_in, -1, p_in, chosen_res + 1000, -1, start_time});
+                    log.push_back({OpType::MOVE, node.id, lq_in, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
                     out_moves++;
                     total_routing_cost += MOVE_COST;
                     start_time += MOVE_COST;
@@ -213,10 +217,10 @@ public:
                     state.res_occupant[chosen_res] = p_in;
                     q_logical_depth[p_in] += 1;
                 } else {
-                    start_time = std::max({state.q_ready_time[p_in], state.q_ready_time[p_stay], state.r_ready_time[chosen_res]});
+                    start_time = fast_max(state.q_ready_time[p_in], fast_max(state.q_ready_time[p_stay], state.r_ready_time[chosen_res]));
                 }
 
-                log.push_back({"2Q_LOCAL", node.id, lq_in, lq_stay, chosen_res + 1000, p_stay, p_in, start_time});
+                log.push_back({OpType::GATE_2Q_LOCAL, node.id, lq_in, lq_stay, chosen_res + RES_OFFSET, p_stay, p_in, start_time});
                 state.q_ready_time[p_in] = start_time + gate_duration;
                 state.q_ready_time[p_stay] = start_time + gate_duration;
                 state.r_ready_time[chosen_res] = start_time + gate_duration;
@@ -226,12 +230,11 @@ public:
                 q_logical_depth[p_stay] = gate_layer + 1;
 
             } else {
-                // GLOBAL 2Q GATE - brak współdzielonego rezonatora
                 force_qubit_down(p1, node.id);
                 force_qubit_down(p2, node.id);
 
-                // ZACHŁANNA STRATEGIA 3: Zawsze bierzemy z góry ustaloną najkrótszą ścieżkę z topologii
-                auto path = topo.get_routing_path(p1, p2);
+                // KRYTYCZNA ZMIANA OGRANICZAJĄCA ALOKACJĘ PAMIĘCI (zwrócenie referencji a nie kopii z macierzy)
+                const auto& path = topo.get_routing_path(p1, p2);
                 int current_p = p1;
 
                 if (path.resonators.empty()) continue;
@@ -241,20 +244,21 @@ public:
                     int next_p = path.qubits[i+1];
 
                     force_qubit_down(next_p, node.id);
-                    double step_start = std::max({state.q_ready_time[current_p], state.r_ready_time[r_step], state.q_ready_time[next_p]});
+                    double step_start = fast_max(state.q_ready_time[current_p], fast_max(state.r_ready_time[r_step], state.q_ready_time[next_p]));
+
                     bool is_move = (state.phys_qubit_to_logical[next_p] == -1);
-                    double op_cost = is_move ? MOVE_COST : SWAP_COST;
+                    double op_cost = is_move ? (2.0 * MOVE_COST) : SWAP_COST;
 
                     total_routing_cost += op_cost;
                     int lq_mov = state.phys_qubit_to_logical[current_p];
                     int lq_target = state.phys_qubit_to_logical[next_p];
 
                     if (is_move) {
-                        log.push_back({"MOVE", node.id, lq_mov, -1, current_p, r_step + 1000, -1, step_start});
-                        log.push_back({"MOVE", node.id, lq_mov, -1, r_step + 1000, next_p, -1, step_start + (op_cost / 2.0)});
+                        log.push_back({OpType::MOVE, node.id, lq_mov, -1, current_p, r_step + RES_OFFSET, -1, step_start});
+                        log.push_back({OpType::MOVE, node.id, lq_mov, -1, r_step + RES_OFFSET, next_p, -1, step_start + MOVE_COST});
                         out_moves += 2;
                     } else {
-                        log.push_back({"SWAP", node.id, lq_mov, lq_target, current_p, next_p, r_step, step_start});
+                        log.push_back({OpType::SWAP, node.id, lq_mov, lq_target, current_p, next_p, r_step, step_start});
                         out_swaps++;
                     }
 
@@ -276,12 +280,12 @@ public:
                     state.q_ready_time[current_p] = step_start + op_cost;
                     state.r_ready_time[r_step] = step_start + op_cost;
                     state.q_ready_time[next_p] = step_start + op_cost;
+
                     current_p = next_p;
                 }
 
                 int final_res = path.resonators.back();
 
-                // Znów wybieramy kubit gotowy wcześniej
                 bool g_q1_goes_in = (state.q_ready_time[current_p] <= state.q_ready_time[p2]);
                 int g_p_in = g_q1_goes_in ? current_p : p2;
                 int g_p_stay = g_q1_goes_in ? p2 : current_p;
@@ -291,9 +295,9 @@ public:
                 force_qubit_down(g_p_stay, node.id);
                 if (state.res_occupant[final_res] != -1 && state.res_occupant[final_res] != g_p_in) force_qubit_down(state.res_occupant[final_res], node.id);
 
-                double exec_start = std::max({state.q_ready_time[current_p], state.q_ready_time[p2], state.r_ready_time[final_res]});
+                double exec_start = fast_max(state.q_ready_time[current_p], fast_max(state.q_ready_time[p2], state.r_ready_time[final_res]));
 
-                log.push_back({"MOVE", node.id, g_lq_in_final, -1, g_p_in, final_res + 1000, -1, exec_start});
+                log.push_back({OpType::MOVE, node.id, g_lq_in_final, -1, g_p_in, final_res + RES_OFFSET, -1, exec_start});
                 out_moves++;
                 total_routing_cost += MOVE_COST;
                 exec_start += MOVE_COST;
@@ -302,7 +306,7 @@ public:
                 state.res_occupant[final_res] = g_p_in;
                 q_logical_depth[g_p_in] += 1;
 
-                log.push_back({"2Q_GLOBAL", node.id, g_lq_in_final, g_lq_stay_final, final_res + 1000, g_p_stay, g_p_in, exec_start});
+                log.push_back({OpType::GATE_2Q_GLOBAL, node.id, g_lq_in_final, g_lq_stay_final, final_res + RES_OFFSET, g_p_stay, g_p_in, exec_start});
 
                 state.q_ready_time[current_p] = exec_start + gate_duration;
                 state.q_ready_time[p2] = exec_start + gate_duration;

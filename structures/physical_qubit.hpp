@@ -1,11 +1,10 @@
 #ifndef PHYSQUBIT_HPP
 #define PHYSQUBIT_HPP
-#include <set>
-
+#include <absl/container/inlined_vector.h>
 
 struct PhysicalQubit {
     int id;
-    std::set<int> connected_resonators;
+    absl::InlinedVector<int, 5> connected_resonators;
 };
 
 #include <fmt/format.h>

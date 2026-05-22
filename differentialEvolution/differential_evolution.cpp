@@ -11,6 +11,9 @@
 #include <fstream>
 #include <queue>
 #include <sstream>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/random/uniform_real_distribution.hpp>
+#include <boost/random/xoshiro.hpp>
 
 class IQMConstellation;
 using namespace std;
@@ -78,303 +81,548 @@ void DifferentialEvolution::preprocess_circuit(const vector<Gate>& circuit) {
     }
 }
 
-double DifferentialEvolution::evaluate_fitness(const vector<double>& genes, int& out_swaps, int& out_moves, double &max_physical_time, int &max_logical_depth, std::vector<RoutingRecord>* out_log) {
-    out_swaps = 0;
-    out_moves = 0;
-    max_physical_time = 0.0;
-    max_logical_depth = 0;
-    if (out_log) out_log->clear();
+void DifferentialEvolution::optimize(int pop_size, int generations, int num_logical_qubits, double f, double cr) {
+    std::cout << "Rozpoczynam optymalizacje DE... (proszę czekać)\n";
 
+    int n_genes = grouped_nodes.size() * 3;
+
+    // Opcjonalny 4. blok DODAJEMY TYLKO, jeśli są w ogóle jakieś wolne fizyczne kubity
+    int logical_q = (num_logical_qubits <= 0) ? num_qubits : num_logical_qubits;
+
+    if (bool can_lazy_offboard = (logical_q < topo.qubits.size())) {
+        n_genes = grouped_nodes.size() * 4;
+        std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
+    }
+
+    if (n_genes == 0) {
+        std::cout << "Obwód jest pusty lub preprocesing zawiódł!\n";
+        return;
+    }
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // 1. Alokacja pamięci i inicjalizacja generatora
+    std::vector<double> pop(pop_size * n_genes);
+    std::vector<double> fitness(pop_size);
+    boost::random::xoshiro256pp rng(1337);
+
+    // 2. Populacja początkowa
+    initialize_population(pop, fitness, pop_size, n_genes, rng);
+
+    // 3. Główna pętla ewolucji
+    run_evolution_loop(pop, fitness, pop_size, generations, n_genes, f, cr, rng);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> execution_time = end_time - start_time;
+
+    // 4. Ewaluacja i eksport najlepszego wyniku
+    process_and_export_best_solution(pop, fitness, n_genes, num_logical_qubits, execution_time.count());
+}
+
+void DifferentialEvolution::initialize_population(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int n_genes, boost::random::xoshiro256pp& rng) {
+    boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
+    std::vector<double> trial(n_genes);
+
+    int d_swaps, d_moves, d_depth;
+    double d_time;
+
+    for (int i = 0; i < pop_size; ++i) {
+        double* __restrict p_pop = pop.data() + i * n_genes;
+        double* __restrict p_trial = trial.data();
+
+        for (int j = 0; j < n_genes; ++j) {
+            double val = dist_real(rng);
+            p_pop[j] = val;
+            p_trial[j] = val;
+        }
+
+        fitness[i] = evaluate_fitness(trial, d_swaps, d_moves, d_time, d_depth, nullptr);
+    }
+}
+
+void DifferentialEvolution::run_evolution_loop(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, double f, double cr, boost::random::xoshiro256pp& rng) {
+    boost::random::uniform_int_distribution<int> dist_int(0, pop_size - 1);
+    std::vector<double> trial(n_genes);
+
+    int d_swaps, d_moves, d_depth;
+    double d_time;
+
+    for (int gen = 0; gen < generations; ++gen) {
+        for (int i = 0; i < pop_size; ++i) {
+            int a, b, c;
+            select_distinct_parents(i, pop_size, rng, dist_int, a, b, c);
+            generate_trial_vector(pop, trial, i, a, b, c, n_genes, f, cr, rng);
+
+            double trial_fitness = evaluate_fitness(trial, d_swaps, d_moves, d_time, d_depth, nullptr);
+            if (trial_fitness < fitness[i]) {
+                std::copy(trial.begin(), trial.end(), pop.begin() + i * n_genes);
+                fitness[i] = trial_fitness;
+            }
+        }
+    }
+}
+
+void DifferentialEvolution::select_distinct_parents(int current_idx, int pop_size, boost::random::xoshiro256pp& rng, boost::random::uniform_int_distribution<int>& dist_int, int& a, int& b, int& c) {
+    do { a = dist_int(rng); } while (a == current_idx);
+    do { b = dist_int(rng); } while (b == current_idx || b == a);
+    do { c = dist_int(rng); } while (c == current_idx || c == a || c == b);
+}
+
+void DifferentialEvolution::generate_trial_vector(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, double f, double cr, boost::random::xoshiro256pp& rng) {
+    boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
+    boost::random::uniform_int_distribution<int> dist_gene(0, n_genes - 1);
+    int R = dist_gene(rng);
+
+    // Surowe, zastrzeżone wskaźniki odblokowują dla kompilatora wektoryzację SIMD.
+    const double* __restrict p_pop = pop.data();
+    double* __restrict p_trial = trial.data();
+
+    const double* __restrict p_a = p_pop + a * n_genes;
+    const double* __restrict p_b = p_pop + b * n_genes;
+    const double* __restrict p_c = p_pop + c * n_genes;
+    const double* __restrict p_curr = p_pop + current_idx * n_genes;
+
+    for (int j = 0; j < n_genes; ++j) {
+        bool mutate = (dist_real(rng) < cr || j == R);
+        double mutated_val = p_a[j] + f * (p_b[j] - p_c[j]);
+        // Zastąpienie if/else potężnie wspiera CPU branch predictor (cmov w x86)
+        p_trial[j] = mutate ? std::clamp(mutated_val, 0.0, 1.0) : p_curr[j];
+    }
+}
+
+void DifferentialEvolution::process_and_export_best_solution(const std::vector<double>& pop, const std::vector<double>& fitness, int n_genes, int num_logical_qubits, double exec_time_sec) {
+    // Szybsze znalezienie minimum przy użyciu iteratorów
+    auto best_iter = ranges::min_element(fitness);
+    int best_idx = std::distance(fitness.begin(), best_iter);
+    double final_best = *best_iter;
+
+    // Kopiowanie najlepszego osobnika do osobnego wektora
+    std::vector<double> best_individual(pop.begin() + best_idx * n_genes, pop.begin() + (best_idx + 1) * n_genes);
+
+    int final_swaps = 0;
+    int final_moves = 0;
+    int final_logical_depth = 0;
+    double final_physical_time = 0.0;
+    std::vector<RoutingRecord> best_moves_log;
+
+    // Ponowna ewaluacja w celu wyciągnięcia pełnych logów (best_moves_log)
+    evaluate_fitness(best_individual, final_swaps, final_moves, final_physical_time, final_logical_depth, &best_moves_log);
+
+    print_optimized_circuit(best_moves_log, num_logical_qubits);
+    print_statistics(final_best, final_swaps, final_moves, final_physical_time, final_logical_depth, exec_time_sec);
+
+    std::cout << "=== WALIDACJA OBWODU LOGICZNEGO ===\n";
+    if (!validate_logical_circuit(original_circuit, best_moves_log)) {
+        exit(-1);
+    }
+    std::cout << "===================================\n\n";
+
+    export_moves_to_file(best_moves_log, "../best_schedule_moves" + name + ".txt");
+}
+
+void DifferentialEvolution::print_statistics(double best_score, int swaps, int moves, double physical_time, int depth, double exec_time) {
+    std::cout << "\n=== STATYSTYKI PO ZAKONCZENIU OPTYMALIZACJI ===\n";
+    std::cout << "Najlepszy znaleziony koszt (Funkcja celu z wagami): " << best_score << "\n";
+    std::cout << "Wykorzystane operacje SWAP: " << swaps << "\n";
+    std::cout << "Wykorzystane operacje MOVE: " << moves << "\n";
+    std::cout << "Czas fizyczny obwodu (Makespan / Physical Time): " << physical_time << " [jednostek]\n";
+    std::cout << "Głębokość warstwowa (Logical Depth / Layers): " << depth << " [warstw]\n";
+    std::cout << "Czas wykonania algorytmu: " << exec_time << " sekund\n";
+    std::cout << "===============================================\n\n";
+}
+
+inline double fast_max(double a, double b) {
+    return (a > b) ? a : b;
+}
+
+double DifferentialEvolution::evaluate_fitness(const vector<double>& genes, int& out_swaps, int& out_moves, double &max_physical_time, int &max_logical_depth, std::vector<RoutingRecord>* out_log) {
+    // Punkt 2: Obliczamy rozmiar raz i przekazujemy jako flagę
+    bool can_lazy_offboard = genes.size() > grouped_nodes.size() * 3;
+
+    // Punkt 3: Rozdzielacz szablonów. Wybiera w czasie kompilacji wersję z logowaniem lub bez.
+    if (out_log) return evaluate_fitness_impl<true>(genes, out_swaps, out_moves, max_physical_time, max_logical_depth, out_log, can_lazy_offboard);
+    return evaluate_fitness_impl<false>(genes, out_swaps, out_moves, max_physical_time, max_logical_depth, nullptr, can_lazy_offboard);
+}
+
+template <bool LOGGING>
+double DifferentialEvolution::evaluate_fitness_impl(const vector<double>& genes, int& out_swaps, int& out_moves, double &max_physical_time, int &max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    out_swaps = 0; out_moves = 0; max_physical_time = 0.0; max_logical_depth = 0;
     int n_gates = grouped_nodes.size();
-    const double MOVE_COST = 1.0;
-    const double SWAP_COST = 3.14;
     double total_routing_cost = 0.0;
 
-    MachineState state;
-    state.phys_qubit_to_logical.assign(topo.qubits.size(), -1);
-    state.logical_to_phys_qubit.assign(num_qubits, -1);
-    state.q_on_resonator.assign(topo.qubits.size(), -1);
-    state.res_occupant.assign(topo.resonators.size(), -1);
-    state.q_ready_time.assign(topo.qubits.size(), 0.0);
-    state.r_ready_time.assign(topo.resonators.size(), 0.0);
-
-    // NOWE: Tablica śledząca warstwy (głębokość logiczną) dla każdego kubitu fizycznego
-    std::vector<int> q_logical_depth(topo.qubits.size(), 0);
-
-    auto force_qubit_down = [&](int p, int current_gate_id) {
-        if (state.q_on_resonator[p] != -1) {
-            int r = state.q_on_resonator[p];
-            double step_start = std::max(state.q_ready_time[p], state.r_ready_time[r]);
-
-            if (out_log) {
-                int lq = state.phys_qubit_to_logical[p];
-                out_log->push_back({"MOVE", current_gate_id, lq, -1, r + RES_OFFSET, p, -1, step_start});
-            }
-            out_moves++;
-            total_routing_cost += MOVE_COST;
-
-            state.q_ready_time[p] = step_start + MOVE_COST;
-            state.r_ready_time[r] = step_start + MOVE_COST;
-
-            q_logical_depth[p] += 1; // Zrzucenie zajmuje warstwę operacyjną
-
-            state.q_on_resonator[p] = -1;
-            state.res_occupant[r] = -1;
-        }
-    };
-
-    for (int i = 0; i < num_qubits; ++i) {
-        state.logical_to_phys_qubit[i] = i;
-        state.phys_qubit_to_logical[i] = i;
-    }
+    prepare_workspaces(n_gates, out_log);
 
     auto cmp = [&genes](int left, int right) { return genes[left] < genes[right]; };
-    priority_queue<int, std::vector<int>, decltype(cmp)> ready_queue(cmp);
 
-    std::vector<int> deps = std::vector<int>(n_gates);
+    ready_queue_workspace.clear();
     for (int i = 0; i < n_gates; ++i) {
-        deps[i] = grouped_nodes[i].deps_count;
-        if (deps[i] == 0) ready_queue.push(i);
+        deps_workspace[i] = grouped_nodes[i].deps_count;
+        if (deps_workspace[i] == 0) ready_queue_workspace.push_back(i);
     }
+    std::make_heap(ready_queue_workspace.begin(), ready_queue_workspace.end(), cmp);
 
-    while (!ready_queue.empty()) {
-        int gate_id = ready_queue.top();
-        ready_queue.pop();
+    while (!ready_queue_workspace.empty()) {
+        std::pop_heap(ready_queue_workspace.begin(), ready_queue_workspace.end(), cmp);
+        int gate_id = ready_queue_workspace.back();
+        ready_queue_workspace.pop_back();
+
         const GateNode& node = grouped_nodes[gate_id];
+        int p1 = state_workspace.logical_to_phys_qubit[node.lq1];
 
-        int p1 = state.logical_to_phys_qubit[node.lq1];
+        // Wywołania korzystają z dziedziczonego LOGGING
+        apply_1q_gates<LOGGING>(node.id, node.lq1, p1, node.q1_1q_count, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
 
         if (node.lq2 == -1) {
-            if (node.q1_1q_count > 0) force_qubit_down(p1, node.id);
-
-            if (out_log) {
-                for (int i = 0; i < node.q1_1q_count; ++i) {
-                    out_log->push_back({"1Q", node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
-                }
-            }
-            state.q_ready_time[p1] += node.q1_1q_count;
-            q_logical_depth[p1] += node.q1_1q_count; // Dodaj warstwy bramek 1Q
-
             for (int next_id : node.next_gates) {
-                deps[next_id]--;
-                if (deps[next_id] == 0) ready_queue.push(next_id);
+                deps_workspace[next_id]--;
+                if (deps_workspace[next_id] == 0) {
+                    ready_queue_workspace.push_back(next_id);
+                    std::push_heap(ready_queue_workspace.begin(), ready_queue_workspace.end(), cmp);
+                }
             }
             continue;
         }
 
-        int p2 = state.logical_to_phys_qubit[node.lq2];
+        int p2 = state_workspace.logical_to_phys_qubit[node.lq2];
+        apply_1q_gates<LOGGING>(node.id, node.lq2, p2, node.q2_1q_count, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
 
-        if (node.q1_1q_count > 0) force_qubit_down(p1, node.id);
-        if (node.lq2 != -1 && node.q2_1q_count > 0) force_qubit_down(p2, node.id);
-
-        if (out_log) {
-            for (int i = 0; i < node.q1_1q_count; ++i)
-                out_log->push_back({"1Q", node.id, node.lq1, -1, p1, -1, -1, state.q_ready_time[p1] + i});
-            for (int i = 0; i < node.q2_1q_count; ++i)
-                out_log->push_back({"1Q", node.id, node.lq2, -1, p2, -1, -1, state.q_ready_time[p2] + i});
-        }
-
-        state.q_ready_time[p1] += node.q1_1q_count;
-        state.q_ready_time[p2] += node.q2_1q_count;
-        q_logical_depth[p1] += node.q1_1q_count; // Aktualizacja głębokości logicznej 1Q
-        q_logical_depth[p2] += node.q2_1q_count;
-
-        std::vector<int> shared_res;
+        shared_res_workspace.clear();
+        const auto& p2_resonators = topo.qubits[p2].connected_resonators;
         for (int r : topo.qubits[p1].connected_resonators) {
-            if (topo.qubits[p2].connected_resonators.count(r)) shared_res.push_back(r);
+            if (ranges::find(p2_resonators, r) != p2_resonators.end()) {
+                shared_res_workspace.push_back(r);
+            }
         }
 
-        double start_time = std::max(state.q_ready_time[p1], state.q_ready_time[p2]);
-        int gate_duration = 1;
-
-        bool q1_goes_in = false;
-        if (node.q1_1q_count < node.q2_1q_count) q1_goes_in = true;
-        else if (node.q1_1q_count > node.q2_1q_count) q1_goes_in = false;
-        else q1_goes_in = (genes[n_gates * 2 + gate_id] < 0.5);
-
-        int p_in, p_stay, lq_in, lq_stay;
-        if (q1_goes_in) {
-            p_in = p1; p_stay = p2; lq_in = node.lq1; lq_stay = node.lq2;
+        if (!shared_res_workspace.empty()) {
+            execute_local_2q_gate<LOGGING>(node, p1, p2, gate_id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
         } else {
-            p_in = p2; p_stay = p1; lq_in = node.lq2; lq_stay = node.lq1;
-        }
-
-        if (!shared_res.empty()) {
-            int chosen_res = shared_res[0];
-            if (shared_res.size() > 1) {
-                int res_idx = (int)(genes[n_gates + gate_id] * shared_res.size());
-                chosen_res = shared_res[std::min(res_idx, (int)shared_res.size() - 1)];
-            }
-
-            force_qubit_down(p_stay, node.id);
-
-            if (state.res_occupant[chosen_res] != -1 && state.res_occupant[chosen_res] != p_in) {
-                force_qubit_down(state.res_occupant[chosen_res], node.id);
-            }
-
-            if (state.q_on_resonator[p_in] != chosen_res) {
-                force_qubit_down(p_in, node.id);
-
-                start_time = std::max({state.q_ready_time[p_in], state.q_ready_time[p_stay], state.r_ready_time[chosen_res]});
-
-                if (out_log) out_log->push_back({"MOVE", node.id, lq_in, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
-                out_moves++;
-                total_routing_cost += MOVE_COST;
-                start_time += MOVE_COST;
-
-                state.q_on_resonator[p_in] = chosen_res;
-                state.res_occupant[chosen_res] = p_in;
-                q_logical_depth[p_in] += 1; // Podniesienie zajmuje warstwę
-            } else {
-                start_time = std::max({state.q_ready_time[p_in], state.q_ready_time[p_stay], state.r_ready_time[chosen_res]});
-            }
-
-            if (out_log) {
-                out_log->push_back({"2Q_LOCAL", node.id, lq_in, lq_stay, chosen_res + RES_OFFSET, p_stay, p_in, start_time});
-            }
-
-            state.q_ready_time[p_in] = start_time + gate_duration;
-            state.q_ready_time[p_stay] = start_time + gate_duration;
-            state.r_ready_time[chosen_res] = start_time + gate_duration;
-
-            // Rejestracja warstwy bramki 2Q
-            int gate_layer = std::max(q_logical_depth[p_in], q_logical_depth[p_stay]);
-            q_logical_depth[p_in] = gate_layer + 1;
-            q_logical_depth[p_stay] = gate_layer + 1;
-
-        } else {
-            force_qubit_down(p1, node.id);
-            force_qubit_down(p2, node.id);
-
-            auto path = topo.get_routing_path(p1, p2);
-            int current_p = p1;
-
-            if (path.resonators.empty()) continue;
-
-            for (size_t i = 0; i < path.resonators.size() - 1; ++i) {
-                int r_step = path.resonators[i];
-                int next_p = path.qubits[i+1];
-
-                force_qubit_down(next_p, node.id);
-
-                double step_start = std::max({state.q_ready_time[current_p], state.r_ready_time[r_step], state.q_ready_time[next_p]});
-                bool is_move = (state.phys_qubit_to_logical[next_p] == -1);
-
-                double op_cost = is_move ? MOVE_COST : SWAP_COST;
-                total_routing_cost += op_cost;
-
-                int lq_mov = state.phys_qubit_to_logical[current_p];
-                int lq_target = state.phys_qubit_to_logical[next_p];
-
-                if (out_log) {
-                    if (is_move) {
-                        out_log->push_back({"MOVE", node.id, lq_mov, -1, current_p, r_step + RES_OFFSET, -1, step_start});
-                        out_log->push_back({"MOVE", node.id, lq_mov, -1, r_step + RES_OFFSET, next_p, -1, step_start + (op_cost / 2.0)});
-                    } else {
-                        out_log->push_back({"SWAP", node.id, lq_mov, lq_target, current_p, next_p, r_step, step_start});
-                    }
-                }
-
-                // Aktualizacja warstwy logicznej dla SWAP / MOVE
-                int current_layer = std::max(q_logical_depth[current_p], q_logical_depth[next_p]);
-                int layers_added = is_move ? 2 : 1; // Podwójny MOVE kosztuje 2 operacje
-                q_logical_depth[current_p] = current_layer + layers_added;
-                q_logical_depth[next_p] = current_layer + layers_added;
-
-                if (is_move) out_moves += 2;
-                else out_swaps++;
-
-                state.phys_qubit_to_logical[next_p] = lq_mov;
-                state.logical_to_phys_qubit[lq_mov] = next_p;
-
-                if (!is_move && lq_target != -1) {
-                    state.phys_qubit_to_logical[current_p] = lq_target;
-                    state.logical_to_phys_qubit[lq_target] = current_p;
-                } else {
-                    state.phys_qubit_to_logical[current_p] = -1;
-                }
-
-                state.q_ready_time[current_p] = step_start + op_cost;
-                state.r_ready_time[r_step] = step_start + op_cost;
-                state.q_ready_time[next_p] = step_start + op_cost;
-
-                current_p = next_p;
-            }
-
-            int final_res = path.resonators.back();
-
-            bool g_q1_goes_in = false;
-            int g_lq_in_cand = state.phys_qubit_to_logical[current_p];
-            int g_lq_stay_cand = state.phys_qubit_to_logical[p2];
-
-            int q_in_1q_count = (g_lq_in_cand == node.lq1) ? node.q1_1q_count : node.q2_1q_count;
-            int q_stay_1q_count = (g_lq_stay_cand == node.lq1) ? node.q1_1q_count : node.q2_1q_count;
-
-            if (q_in_1q_count < q_stay_1q_count) g_q1_goes_in = true;
-            else if (q_in_1q_count > q_stay_1q_count) g_q1_goes_in = false;
-            else g_q1_goes_in = (genes[n_gates * 2 + gate_id] < 0.5);
-
-            int g_p_in, g_p_stay, g_lq_in_final, g_lq_stay_final;
-            if (g_q1_goes_in) {
-                g_p_in = current_p; g_p_stay = p2;
-                g_lq_in_final = g_lq_in_cand; g_lq_stay_final = g_lq_stay_cand;
-            } else {
-                g_p_in = p2; g_p_stay = current_p;
-                g_lq_in_final = g_lq_stay_cand; g_lq_stay_final = g_lq_in_cand;
-            }
-            force_qubit_down(g_p_stay, node.id);
-
-            if (state.res_occupant[final_res] != -1 && state.res_occupant[final_res] != g_p_in) {
-                force_qubit_down(state.res_occupant[final_res], node.id);
-            }
-
-            double exec_start = std::max({state.q_ready_time[current_p], state.q_ready_time[p2], state.r_ready_time[final_res]});
-
-            if (out_log) out_log->push_back({"MOVE", node.id, g_lq_in_final, -1, g_p_in, final_res + RES_OFFSET, -1, exec_start});
-            out_moves++;
-            total_routing_cost += MOVE_COST;
-            exec_start += MOVE_COST;
-
-            state.q_on_resonator[g_p_in] = final_res;
-            state.res_occupant[final_res] = g_p_in;
-            q_logical_depth[g_p_in] += 1; // Podniesienie na finalny rezonator
-
-            if (out_log) out_log->push_back({"2Q_GLOBAL", node.id, g_lq_in_final, g_lq_stay_final, final_res + RES_OFFSET, g_p_stay, g_p_in, exec_start});
-
-            state.q_ready_time[current_p] = exec_start + gate_duration;
-            state.q_ready_time[p2] = exec_start + gate_duration;
-            state.r_ready_time[final_res] = exec_start + gate_duration;
-
-            // Rejestracja globalnej bramki 2Q logicznie
-            int global_gate_layer = std::max(q_logical_depth[current_p], q_logical_depth[p2]);
-            q_logical_depth[current_p] = global_gate_layer + 1;
-            q_logical_depth[p2] = global_gate_layer + 1;
+            execute_routed_2q_gate<LOGGING>(node, p1, p2, gate_id, genes, n_gates, out_swaps, out_moves, total_routing_cost, out_log, can_lazy_offboard);
         }
 
         for (int next_id : node.next_gates) {
-            deps[next_id]--;
-            if (deps[next_id] == 0) ready_queue.push(next_id);
+            deps_workspace[next_id]--;
+            if (deps_workspace[next_id] == 0) {
+                ready_queue_workspace.push_back(next_id);
+                std::push_heap(ready_queue_workspace.begin(), ready_queue_workspace.end(), cmp);
+            }
         }
     }
 
-    for (int p = 0; p < topo.qubits.size(); ++p) {
-        force_qubit_down(p, -1);
-    }
+    return finalize_and_calculate_fitness<LOGGING>(genes, n_gates, out_moves, total_routing_cost, max_physical_time, max_logical_depth, out_log, can_lazy_offboard);
+}
 
+void DifferentialEvolution::prepare_workspaces(int n_gates, std::vector<RoutingRecord>* out_log) {
     if (out_log) {
-        std::stable_sort(out_log->begin(), out_log->end(), [](const RoutingRecord& a, const RoutingRecord& b) {
-            return a.start_time < b.start_time;
-        });
+        out_log->clear();
+        out_log->reserve(n_gates * 3);
     }
 
-    for (double t : state.q_ready_time) max_physical_time = std::max(max_physical_time, t);
-    for (int d : q_logical_depth) max_logical_depth = std::max(max_logical_depth, d);
+    // Inicjalizacja rozmiarów TYLKO RAZ (alokacja stronnicowania)
+    if (state_workspace.phys_qubit_to_logical.empty()) {
+        state_workspace.phys_qubit_to_logical.resize(topo.qubits.size());
+        state_workspace.logical_to_phys_qubit.resize(num_qubits);
+        state_workspace.q_on_resonator.resize(topo.qubits.size());
+        state_workspace.res_occupant.resize(topo.resonators.size());
+        state_workspace.q_ready_time.resize(topo.qubits.size());
+        state_workspace.r_ready_time.resize(topo.resonators.size());
+        q_logical_depth_workspace.resize(topo.qubits.size());
+        deps_workspace.resize(n_gates);
+    }
 
-    // Modyfikacja funkcji celu (Fitness): Suma ważona
-    // Mozesz dostosowac wagi do swoich potrzeb badawczych
-    double w_routing = 1000.0;     // Priorytet komunikacji (routing)
-    double w_physical_time = 1.0;  // Priorytet Makespan (względem dekoherencji)
-    double w_logical_depth = 0.5;  // Mniejsza waga, ale faworyzuje mniejszą liczbę warstw bramek
+    // Ekstremalnie szybki zapis blokowy bezpośrednio do pamięci
+    // Wartość 0xFF daje dokładnie bitowe -1 (dla int w kodzie uzupełnień do 2)
+    std::memset(state_workspace.phys_qubit_to_logical.data(), 0xFF, topo.qubits.size() * sizeof(int));
+    std::memset(state_workspace.logical_to_phys_qubit.data(), 0xFF, num_qubits * sizeof(int));
+    std::memset(state_workspace.q_on_resonator.data(), 0xFF, topo.qubits.size() * sizeof(int));
+    std::memset(state_workspace.res_occupant.data(), 0xFF, topo.resonators.size() * sizeof(int));
+
+    // W IEEE 754 zera to binarne same zera, więc możemy użyć memset do czyszczenia wektorów double
+    std::memset(state_workspace.q_ready_time.data(), 0, topo.qubits.size() * sizeof(double));
+    std::memset(state_workspace.r_ready_time.data(), 0, topo.resonators.size() * sizeof(double));
+    std::memset(q_logical_depth_workspace.data(), 0, topo.qubits.size() * sizeof(int));
+
+    // UWAGA: Usunąłem deps_workspace.assign(n_gates, 0)! Wyjaśnienie w punkcie 3.
+
+    for (int i = 0; i < num_qubits; ++i) {
+        state_workspace.logical_to_phys_qubit[i] = i;
+        state_workspace.phys_qubit_to_logical[i] = i;
+    }
+}
+
+template <bool LOGGING>
+void DifferentialEvolution::force_qubit_down(int& p, int current_gate_id, const std::vector<double>& genes, int n_gates, int& out_moves, double& total_routing_cost, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    int r = state_workspace.q_on_resonator[p];
+    if (r == -1) return;
+
+    int target_p = p;
+
+    // Punkt 2 w akcji - tanie sprawdzenie flagi zamiast .size()
+    if (current_gate_id >= 0 && can_lazy_offboard) {
+        int valid_count = 1;
+        const auto& connected = topo.resonators[r].connected_qubits;
+
+        for (int p_cand : connected) {
+            if (p_cand != p && state_workspace.phys_qubit_to_logical[p_cand] == -1 && state_workspace.q_on_resonator[p_cand] == -1) {
+                valid_count++;
+            }
+        }
+
+        if (valid_count > 1) {
+            double gene_val = genes[n_gates * 3 + current_gate_id];
+            int target_idx = static_cast<int>(gene_val * valid_count);
+            if (target_idx >= valid_count) target_idx = valid_count - 1;
+
+            if (target_idx > 0) {
+                int curr_idx = 1;
+                for (int p_cand : connected) {
+                    if (p_cand != p && state_workspace.phys_qubit_to_logical[p_cand] == -1 && state_workspace.q_on_resonator[p_cand] == -1) {
+                        if (curr_idx == target_idx) { target_p = p_cand; break; }
+                        curr_idx++;
+                    }
+                }
+            }
+        }
+    }
+
+    double step_start = fast_max(state_workspace.q_ready_time[p], state_workspace.r_ready_time[r]);
+    if (target_p != p) step_start = fast_max(step_start, state_workspace.q_ready_time[target_p]);
+
+    int lq = state_workspace.phys_qubit_to_logical[p];
+
+    // Punkt 3: Kompilator całkowicie USUNIE to sprawdzenie z głównej pętli!
+    if constexpr (LOGGING) {
+        out_log->push_back({OpType::MOVE, current_gate_id, lq, -1, r + RES_OFFSET, target_p, -1, step_start});
+    }
+    out_moves++;
+    total_routing_cost += MOVE_COST;
+
+    state_workspace.q_ready_time[target_p] = step_start + MOVE_COST;
+    state_workspace.r_ready_time[r] = step_start + MOVE_COST;
+
+    if (target_p != p) {
+        state_workspace.phys_qubit_to_logical[target_p] = lq;
+        state_workspace.logical_to_phys_qubit[lq] = target_p;
+        state_workspace.phys_qubit_to_logical[p] = -1;
+        q_logical_depth_workspace[target_p] = q_logical_depth_workspace[p] + 1;
+        q_logical_depth_workspace[p] = 0;
+    } else {
+        q_logical_depth_workspace[p] += 1;
+    }
+
+    state_workspace.q_on_resonator[p] = -1;
+    state_workspace.q_on_resonator[target_p] = -1;
+    state_workspace.res_occupant[r] = -1;
+    p = target_p;
+}
+
+template <bool LOGGING>
+void DifferentialEvolution::apply_1q_gates(int gate_id, int lq, int& p, int q_1q_count, const std::vector<double>& genes, int n_gates, int& out_moves, double& total_routing_cost, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    if (q_1q_count > 0) {
+        force_qubit_down<LOGGING>(p, gate_id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+        if constexpr (LOGGING) {
+            for (int i = 0; i < q_1q_count; ++i) {
+                out_log->push_back({OpType::GATE_1Q, gate_id, lq, -1, p, -1, -1, state_workspace.q_ready_time[p] + i});
+            }
+        }
+        state_workspace.q_ready_time[p] += q_1q_count;
+        q_logical_depth_workspace[p] += q_1q_count;
+    }
+}
+
+template <bool LOGGING>
+void DifferentialEvolution::execute_local_2q_gate(const GateNode& node, int p1, int p2, int gate_id, const std::vector<double>& genes, int n_gates, int& out_moves, double& total_routing_cost, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    double start_time = fast_max(state_workspace.q_ready_time[p1], state_workspace.q_ready_time[p2]);
+
+    bool q1_goes_in = (node.q1_1q_count < node.q2_1q_count) ? true :
+                      (node.q1_1q_count > node.q2_1q_count) ? false :
+                      (genes[n_gates * 2 + gate_id] < 0.5);
+
+    int p_in = q1_goes_in ? p1 : p2;
+    int p_stay = q1_goes_in ? p2 : p1;
+    int lq_in = q1_goes_in ? node.lq1 : node.lq2;
+    int lq_stay = q1_goes_in ? node.lq2 : node.lq1;
+
+    int chosen_res = shared_res_workspace[0];
+    if (shared_res_workspace.size() > 1) {
+        int res_idx = (int)(genes[n_gates + gate_id] * shared_res_workspace.size());
+        chosen_res = shared_res_workspace[std::min(res_idx, (int)shared_res_workspace.size() - 1)];
+    }
+
+    force_qubit_down<LOGGING>(p_stay, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+    if (state_workspace.res_occupant[chosen_res] != -1 && state_workspace.res_occupant[chosen_res] != p_in) {
+        int occ = state_workspace.res_occupant[chosen_res];
+        force_qubit_down<LOGGING>(occ, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+    }
+
+    if (state_workspace.q_on_resonator[p_in] != chosen_res) {
+        force_qubit_down<LOGGING>(p_in, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+        start_time = fast_max(state_workspace.q_ready_time[p_in], fast_max(state_workspace.q_ready_time[p_stay], state_workspace.r_ready_time[chosen_res]));
+
+        if constexpr (LOGGING) {
+            out_log->push_back({OpType::MOVE, node.id, lq_in, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
+        }
+        out_moves++;
+        total_routing_cost += MOVE_COST;
+        start_time += MOVE_COST;
+
+        state_workspace.q_on_resonator[p_in] = chosen_res;
+        state_workspace.res_occupant[chosen_res] = p_in;
+        q_logical_depth_workspace[p_in] += 1;
+    } else {
+        start_time = fast_max(state_workspace.q_ready_time[p_in], fast_max(state_workspace.q_ready_time[p_stay], state_workspace.r_ready_time[chosen_res]));
+    }
+
+    if constexpr (LOGGING) {
+        out_log->push_back({OpType::GATE_2Q_LOCAL, node.id, lq_in, lq_stay, chosen_res + RES_OFFSET, p_stay, p_in, start_time});
+    }
+
+    state_workspace.q_ready_time[p_in] = start_time + 1;
+    state_workspace.q_ready_time[p_stay] = start_time + 1;
+    state_workspace.r_ready_time[chosen_res] = start_time + 1;
+
+    int gate_layer = fast_max(q_logical_depth_workspace[p_in], q_logical_depth_workspace[p_stay]);
+    q_logical_depth_workspace[p_in] = gate_layer + 1;
+    q_logical_depth_workspace[p_stay] = gate_layer + 1;
+}
+
+template <bool LOGGING>
+void DifferentialEvolution::execute_routed_2q_gate(const GateNode& node, int p1, int p2, int gate_id, const std::vector<double>& genes, int n_gates, int& out_swaps, int& out_moves, double& total_routing_cost, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    force_qubit_down<LOGGING>(p1, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+    force_qubit_down<LOGGING>(p2, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+    const auto& path = topo.get_routing_path(p1, p2);
+    if (path.resonators.empty()) return;
+
+    int current_p = p1;
+    process_routing_path<LOGGING>(node, path, current_p, genes, n_gates, out_swaps, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+    int final_res = path.resonators.back();
+    int g_lq_in_cand = state_workspace.phys_qubit_to_logical[current_p];
+    int g_lq_stay_cand = state_workspace.phys_qubit_to_logical[p2];
+
+    int q_in_1q_count = (g_lq_in_cand == node.lq1) ? node.q1_1q_count : node.q2_1q_count;
+    int q_stay_1q_count = (g_lq_stay_cand == node.lq1) ? node.q1_1q_count : node.q2_1q_count;
+
+    bool g_q1_goes_in = (q_in_1q_count < q_stay_1q_count) ? true :
+                        (q_in_1q_count > q_stay_1q_count) ? false :
+                        (genes[n_gates * 2 + gate_id] < 0.5);
+
+    int g_p_in = g_q1_goes_in ? current_p : p2;
+    int g_p_stay = g_q1_goes_in ? p2 : current_p;
+    int g_lq_in_final = g_q1_goes_in ? g_lq_in_cand : g_lq_stay_cand;
+    int g_lq_stay_final = g_q1_goes_in ? g_lq_stay_cand : g_lq_in_cand;
+
+    force_qubit_down<LOGGING>(g_p_stay, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+    if (state_workspace.res_occupant[final_res] != -1 && state_workspace.res_occupant[final_res] != g_p_in) {
+        int occ = state_workspace.res_occupant[final_res];
+        force_qubit_down<LOGGING>(occ, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+    }
+
+    double exec_start = fast_max(state_workspace.q_ready_time[current_p], fast_max(state_workspace.q_ready_time[p2], state_workspace.r_ready_time[final_res]));
+
+    if constexpr (LOGGING) {
+        out_log->push_back({OpType::MOVE, node.id, g_lq_in_final, -1, g_p_in, final_res + RES_OFFSET, -1, exec_start});
+    }
+
+    out_moves++;
+    total_routing_cost += MOVE_COST;
+    exec_start += MOVE_COST;
+
+    state_workspace.q_on_resonator[g_p_in] = final_res;
+    state_workspace.res_occupant[final_res] = g_p_in;
+    q_logical_depth_workspace[g_p_in] += 1;
+
+    if constexpr (LOGGING) {
+        out_log->push_back({OpType::GATE_2Q_GLOBAL, node.id, g_lq_in_final, g_lq_stay_final, final_res + RES_OFFSET, g_p_stay, g_p_in, exec_start});
+    }
+
+    state_workspace.q_ready_time[current_p] = exec_start + 1;
+    state_workspace.q_ready_time[p2] = exec_start + 1;
+    state_workspace.r_ready_time[final_res] = exec_start + 1;
+
+    int global_gate_layer = fast_max(q_logical_depth_workspace[current_p], q_logical_depth_workspace[p2]);
+    q_logical_depth_workspace[current_p] = global_gate_layer + 1;
+    q_logical_depth_workspace[p2] = global_gate_layer + 1;
+}
+
+template <bool LOGGING>
+void DifferentialEvolution::process_routing_path(const GateNode& node, const RoutingPath& path, int& current_p, const std::vector<double>& genes, int n_gates, int& out_swaps, int& out_moves, double& total_routing_cost, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    for (size_t i = 0; i < path.resonators.size() - 1; ++i) {
+        int r_step = path.resonators[i];
+        int next_p = path.qubits[i+1];
+
+        int occ = next_p;
+        force_qubit_down<LOGGING>(occ, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+
+        double step_start = fast_max(state_workspace.q_ready_time[current_p], fast_max(state_workspace.r_ready_time[r_step], state_workspace.q_ready_time[next_p]));
+        bool is_move = (state_workspace.phys_qubit_to_logical[next_p] == -1);
+        double op_cost = is_move ? (2.0 * MOVE_COST) : SWAP_COST;
+        total_routing_cost += op_cost;
+
+        int lq_mov = state_workspace.phys_qubit_to_logical[current_p];
+        int lq_target = state_workspace.phys_qubit_to_logical[next_p];
+
+        if constexpr (LOGGING) {
+            if (is_move) {
+                out_log->push_back({OpType::MOVE, node.id, lq_mov, -1, current_p, r_step + RES_OFFSET, -1, step_start});
+                out_log->push_back({OpType::MOVE, node.id, lq_mov, -1, r_step + RES_OFFSET, next_p, -1, step_start + MOVE_COST});
+            } else {
+                out_log->push_back({OpType::SWAP, node.id, lq_mov, lq_target, current_p, next_p, r_step, step_start});
+            }
+        }
+
+        int current_layer = fast_max(q_logical_depth_workspace[current_p], q_logical_depth_workspace[next_p]);
+        int layers_added = is_move ? 2 : 1;
+        q_logical_depth_workspace[current_p] = current_layer + layers_added;
+        q_logical_depth_workspace[next_p] = current_layer + layers_added;
+
+        if (is_move) out_moves += 2;
+        else out_swaps++;
+
+        state_workspace.phys_qubit_to_logical[next_p] = lq_mov;
+        state_workspace.logical_to_phys_qubit[lq_mov] = next_p;
+
+        if (!is_move && lq_target != -1) {
+            state_workspace.phys_qubit_to_logical[current_p] = lq_target;
+            state_workspace.logical_to_phys_qubit[lq_target] = current_p;
+        } else {
+            state_workspace.phys_qubit_to_logical[current_p] = -1;
+        }
+
+        state_workspace.q_ready_time[current_p] = step_start + op_cost;
+        state_workspace.r_ready_time[r_step] = step_start + op_cost;
+        state_workspace.q_ready_time[next_p] = step_start + op_cost;
+
+        current_p = next_p;
+    }
+}
+
+template <bool LOGGING>
+double DifferentialEvolution::finalize_and_calculate_fitness(const std::vector<double>& genes, int n_gates, int& out_moves, double& total_routing_cost, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    for (int p = 0; p < topo.qubits.size(); ++p) {
+        int temp_p = p;
+        force_qubit_down<LOGGING>(temp_p, -1, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+    }
+
+    // Punkt 4: Sortujemy tylko wtedy, gdy faktycznie są jakieś logi
+    if constexpr (LOGGING) {
+        if (out_log && !out_log->empty()) {
+            std::stable_sort(out_log->begin(), out_log->end(), [](const RoutingRecord& a, const RoutingRecord& b) {
+                return a.start_time < b.start_time;
+            });
+        }
+    }
+
+    for (double t : state_workspace.q_ready_time) max_physical_time = fast_max(max_physical_time, t);
+    for (int d : q_logical_depth_workspace) max_logical_depth = fast_max(max_logical_depth, d);
+
+    double w_routing = 1000.0;
+    double w_physical_time = 1.0;
+    double w_logical_depth = 0.5;
 
     return (total_routing_cost * w_routing) + (max_physical_time * w_physical_time) + (max_logical_depth * w_logical_depth);
 }
@@ -411,24 +659,24 @@ void DifferentialEvolution::print_optimized_circuit(const std::vector<RoutingRec
         int l1 = move.loc1;
         int l2 = move.loc2;
 
-        if (move.op_type == "1Q") {
+        if (move.op_type == OpType::GATE_1Q) {
             if (l1 >= 0 && l1 < n_q) lines_q[l1] << "-[ U3 ]-";
             for (int i = 0; i < n_q; ++i) {
                 if (i != l1) lines_q[i] << "--------";
             }
-        } else if (move.op_type == "SWAP") {
+        } else if (move.op_type == OpType::SWAP) {
             int min_q = std::min(l1, l2);
-            int max_q = std::max(l1, l2);
+            int max_q = fast_max(l1, l2);
             for (int i = 0; i < n_q; ++i) {
                 if (i == l1 || i == l2) lines_q[i] << "--x--";
                 else if (i > min_q && i < max_q) lines_q[i] << "--|--";
                 else lines_q[i] << "-----";
             }
-        } else if (move.op_type == "MOVE") {
+        } else if (move.op_type == OpType::MOVE) {
             if (l1 < RES_OFFSET && l2 < RES_OFFSET && l2 >= 0) {
                 // Routing MOVE między dwoma fizycznymi kubitami (jeden jest pusty)
                 int min_q = std::min(l1, l2);
-                int max_q = std::max(l1, l2);
+                int max_q = fast_max(l1, l2);
                 for (int i = 0; i < n_q; ++i) {
                     if (i == l1 || i == l2) lines_q[i] << "--m--";
                     else if (i > min_q && i < max_q) lines_q[i] << "--|--";
@@ -442,7 +690,7 @@ void DifferentialEvolution::print_optimized_circuit(const std::vector<RoutingRec
                     else lines_q[i] << "-----";
                 }
             }
-        } else if (move.op_type == "2Q_LOCAL" || move.op_type == "2Q_GLOBAL") {
+        } else if (move.op_type == OpType::GATE_2Q_LOCAL || move.op_type == OpType::GATE_2Q_GLOBAL) {
             int r_idx = -1, q_stay = -1;
             if (l1 >= RES_OFFSET) { r_idx = l1 - RES_OFFSET; q_stay = l2; }
             else if (l2 >= RES_OFFSET) { r_idx = l2 - RES_OFFSET; q_stay = l1; }
@@ -451,12 +699,12 @@ void DifferentialEvolution::print_optimized_circuit(const std::vector<RoutingRec
             int q_in = move.res_used; // <- Nowa niezawodna mechanika DE
 
             int min_q = std::min(q_in, q_stay);
-            int max_q = std::max(q_in, q_stay);
+            int max_q = fast_max(q_in, q_stay);
 
             bool q_in_is_control = (move.lq1 == grouped_nodes[move.gate_id].lq1);
 
-            string ctrl_char = (move.op_type == "2Q_LOCAL") ? "--o--" : "--*--";
-            string targ_char = (move.op_type == "2Q_LOCAL") ? "-(+)-" : "-[+]-";
+            string ctrl_char = (move.op_type == OpType::GATE_2Q_LOCAL) ? "--o--" : "--*--";
+            string targ_char = (move.op_type == OpType::GATE_2Q_LOCAL) ? "-(+)-" : "-[+]-";
 
             for (int i = 0; i < n_q; ++i) {
                 if (i == q_in) {
@@ -484,7 +732,7 @@ void DifferentialEvolution::print_optimized_circuit(const std::vector<RoutingRec
     cout << "==================================================\n\n";
 }
 
-void export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::string& filename) {
+void DifferentialEvolution::export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::string& filename) {
     if (moves.empty()) return;
 
     std::ofstream out_file(filename);
@@ -504,7 +752,7 @@ void export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::st
         }
 
         out_file << time_step << ","
-                 << move.op_type << ","
+                 << to_string(move.op_type) << ","
                  << move.gate_id << ","
                  << move.lq1 << ","
                  << move.lq2 << ","
@@ -515,93 +763,6 @@ void export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::st
 
     out_file.close();
     std::cout << ">>> Pomyślnie wyeksportowano współbieżny harmonogram do: " << filename << "\n";
-}
-
-void DifferentialEvolution::optimize(int pop_size, int generations, int num_logical_qubits) {
-    using namespace std::chrono;
-
-    cout << "Rozpoczynam optymalizacje DE... (proszę czekać)" << endl;
-
-    auto start_time = high_resolution_clock::now();
-
-    int n_genes = grouped_nodes.size() * 3;
-
-    if (n_genes == 0) {
-        cout << "Obwód jest pusty lub preprocesing zawiódł!" << endl;
-        return;
-    }
-
-    vector<vector<double>> pop(pop_size, vector<double>(n_genes));
-    vector<double> fitness(pop_size);
-    mt19937 rng(1337);
-    uniform_real_distribution<double> dist(0.0, 1.0);
-
-    int dummy_swaps, dummy_moves, dummy_logical_depth;
-    double dummy_physical_time = 0.0;
-
-    for (int i = 0; i < pop_size; ++i) {
-        for (int j = 0; j < n_genes; ++j) pop[i][j] = dist(rng);
-        fitness[i] = evaluate_fitness(pop[i], dummy_swaps, dummy_moves, dummy_physical_time, dummy_logical_depth);
-    }
-
-    double f = 0.8;
-    double cr = 0.9;
-
-    for (int gen = 0; gen < generations; ++gen) {
-        for (int i = 0; i < pop_size; ++i) {
-            int a = i, b = i, c = i;
-            while(a == i) a = rng() % pop_size;
-            while(b == i || b == a) b = rng() % pop_size;
-            while(c == i || c == a || c == b) c = rng() % pop_size;
-
-            vector<double> trial = pop[i];
-            int R = rng() % n_genes;
-
-            for (int j = 0; j < n_genes; ++j) {
-                if (dist(rng) < cr || j == R) {
-                    trial[j] = pop[a][j] + f * (pop[b][j] - pop[c][j]);
-                    if (trial[j] < 0.0) trial[j] = 0.0;
-                    if (trial[j] > 1.0) trial[j] = 1.0;
-                }
-            }
-
-            double trial_fitness = evaluate_fitness(trial, dummy_swaps, dummy_moves, dummy_physical_time, dummy_logical_depth);
-            if (trial_fitness < fitness[i]) {
-                pop[i] = trial;
-                fitness[i] = trial_fitness;
-            }
-        }
-    }
-
-    auto end_time = high_resolution_clock::now();
-    duration<double> execution_time = end_time - start_time;
-
-    int best_idx = distance(fitness.begin(), min_element(fitness.begin(), fitness.end()));
-    double final_best = fitness[best_idx];
-
-    int final_swaps = 0;
-    int final_moves = 0;
-    int final_logical_depth = 0;
-    double final_physical_time = 0;
-    std::vector<RoutingRecord> best_moves_log;
-
-    evaluate_fitness(pop[best_idx], final_swaps, final_moves, final_physical_time, final_logical_depth, &best_moves_log);
-    print_optimized_circuit(best_moves_log, num_logical_qubits);
-
-    cout << "\n=== STATYSTYKI PO ZAKONCZENIU OPTYMALIZACJI ===" << endl;
-    cout << "Najlepszy znaleziony koszt (Funkcja celu z wagami): " << final_best << endl;
-    cout << "Wykorzystane operacje SWAP: " << final_swaps << endl;
-    cout << "Wykorzystane operacje MOVE: " << final_moves << endl;
-    cout << "Czas fizyczny obwodu (Makespan / Physical Time): " << final_physical_time << " [jednostek]" << endl;
-    cout << "Głębokość warstwowa (Logical Depth / Layers): " << final_logical_depth << " [warstw]" << endl;
-    cout << "Czas wykonania algorytmu: " << execution_time.count() << " sekund" << endl;
-    cout << "===============================================\n" << endl;
-
-    cout << "=== WALIDACJA OBWODU LOGICZNEGO ===" << endl;
-    if (!validate_logical_circuit(original_circuit, best_moves_log)) exit(-1);
-    cout << "===================================\n" << endl;
-
-    export_moves_to_file(best_moves_log, "../best_schedule_moves" + name + ".txt");
 }
 
 bool DifferentialEvolution::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log) const {
@@ -617,9 +778,9 @@ bool DifferentialEvolution::validate_logical_circuit(const std::vector<Gate>& or
 
     std::vector<std::vector<std::string>> actual(num_qubits);
     for (const auto& op : log) {
-        if (op.op_type == "1Q") {
+        if (op.op_type == OpType::GATE_1Q) {
             actual[op.lq1].push_back("1Q");
-        } else if (op.op_type == "2Q_LOCAL" || op.op_type == "2Q_GLOBAL") {
+        } else if (op.op_type == OpType::GATE_2Q_LOCAL || op.op_type == OpType::GATE_2Q_GLOBAL) {
             actual[op.lq1].push_back("2Q_" + std::to_string(op.lq2));
             actual[op.lq2].push_back("2Q_" + std::to_string(op.lq1));
         }
@@ -643,3 +804,6 @@ bool DifferentialEvolution::validate_logical_circuit(const std::vector<Gate>& or
     }
     return is_valid;
 }
+
+template double DifferentialEvolution::evaluate_fitness_impl<true>(const std::vector<double>&, int&, int&, double&, int&, std::vector<RoutingRecord>*, bool);
+template double DifferentialEvolution::evaluate_fitness_impl<false>(const std::vector<double>&, int&, int&, double&, int&, std::vector<RoutingRecord>*, bool);

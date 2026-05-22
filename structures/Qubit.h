@@ -1,14 +1,11 @@
 #ifndef QUBIT_H
 #define QUBIT_H
-
-#include <set>
-
-
+#include <absl/container/inlined_vector.h>
 
 class Qubit {
 public:
     int id;
-    std::set<int> connected_resonators;
+    absl::InlinedVector<int, 5> connected_resonators;
 };
 
 #include <fmt/format.h>
