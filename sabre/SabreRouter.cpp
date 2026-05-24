@@ -10,6 +10,18 @@ SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& 
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
 
+    // OPTYMALIZACJA 1: Prekalkulacja fizycznych połączeń rezonatorów
+    precomputed_swaps.resize(p_cnt);
+    for (int p = 0; p < p_cnt; ++p) {
+        for (int r : topo.qubits[p].connected_resonators) {
+            for (int neighbor_p : topo.resonators[r].connected_qubits) {
+                if (p != neighbor_p) {
+                    precomputed_swaps[p].push_back({neighbor_p, r});
+                }
+            }
+        }
+    }
+
     dag = build_dag(original_circuit);
 
     std::vector<Gate> reversed_circuit = original_circuit;
@@ -25,13 +37,13 @@ int SabreRouter::get_distance(int p1, int p2) const {
     if (dist_cache[idx1] != -1) return dist_cache[idx1];
     int dist = topo.get_routing_path(p1, p2).resonators.size();
 
-    // Zapisujemy pod oba indeksy dla symetrii
     dist_cache[idx1] = dist;
     dist_cache[p2 * p_cnt + p1] = dist;
     return dist;
 }
 
 SabreDAG SabreRouter::build_dag(const std::vector<Gate>& circuit) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     SabreDAG local_dag;
     std::vector<int> last_gate_on_qubit(num_qubits, -1);
     std::vector<int> pending_1q(num_qubits, 0);
@@ -95,6 +107,7 @@ SabreDAG SabreRouter::build_dag(const std::vector<Gate>& circuit) const {
 
 void SabreRouter::force_qubit_down(int p, int current_gate_id, MachineState& state, std::vector<int>& q_logical_depth,
                                    std::vector<RoutingRecord>& log, int& out_moves, double& total_routing_cost, bool is_final) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     if (state.q_on_resonator[p] != -1) {
         int r = state.q_on_resonator[p];
         double step_start = fast_max_sabre(state.q_ready_time[p], state.r_ready_time[r]);
@@ -116,6 +129,7 @@ void SabreRouter::process_executable_gates(const SabreDAG& current_dag, const st
                                            MachineState& state, std::vector<int>& q_logical_depth, std::vector<RoutingRecord>& log,
                                            int& out_moves, double& total_routing_cost, bool is_final,
                                            int& gates_routed, std::vector<int>& deps, std::vector<int>& front_layer) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     for (int gate_id : executable_gates) {
         const GateNode& node = current_dag.nodes[gate_id];
         int p1 = state.logical_to_phys_qubit[node.lq1];
@@ -200,12 +214,13 @@ void SabreRouter::process_executable_gates(const SabreDAG& current_dag, const st
     }
 }
 
+// ZMIANA: std::vector<bool> -> std::vector<uint8_t>
 void SabreRouter::update_active_and_extended_layers(const SabreDAG& current_dag, const std::vector<int>& front_layer,
                                                     const MachineState& state, std::vector<int>& active_phys_qubits,
-                                                    std::vector<bool>& in_active, std::vector<int>& extended_layer,
-                                                    std::vector<bool>& in_extended) const {
-    for (int p : active_phys_qubits) in_active[p] = false;
-    for (int g : extended_layer) in_extended[g] = false;
+                                                    std::vector<uint8_t>& in_active, std::vector<int>& extended_layer,
+                                                    std::vector<uint8_t>& in_extended) const {
+    for (int p : active_phys_qubits) in_active[p] = 0;
+    for (int g : extended_layer) in_extended[g] = 0;
     active_phys_qubits.clear();
     extended_layer.clear();
 
@@ -213,15 +228,15 @@ void SabreRouter::update_active_and_extended_layers(const SabreDAG& current_dag,
         const GateNode& node = current_dag.nodes[gate_id];
         if (node.lq1 != -1) {
             int p1 = state.logical_to_phys_qubit[node.lq1];
-            if (!in_active[p1]) { in_active[p1] = true; active_phys_qubits.push_back(p1); }
+            if (!in_active[p1]) { in_active[p1] = 1; active_phys_qubits.push_back(p1); }
         }
         if (node.lq2 != -1) {
             int p2 = state.logical_to_phys_qubit[node.lq2];
-            if (!in_active[p2]) { in_active[p2] = true; active_phys_qubits.push_back(p2); }
+            if (!in_active[p2]) { in_active[p2] = 1; active_phys_qubits.push_back(p2); }
         }
 
         for (int nxt : node.next_gates) {
-            if (!in_extended[nxt]) { in_extended[nxt] = true; extended_layer.push_back(nxt); }
+            if (!in_extended[nxt]) { in_extended[nxt] = 1; extended_layer.push_back(nxt); }
         }
     }
 }
@@ -233,71 +248,69 @@ SwapCandidate SabreRouter::find_best_swap_candidate(const SabreDAG& current_dag,
     candidates.reserve(topo.qubits.size() * 4);
 
     int p_cnt = topo.qubits.size();
+    std::vector<uint8_t> seen_pairs(p_cnt * p_cnt, 0); // O(1) tablica sprawdzen
 
-    // OPTYMALIZACJA 2: O(1) sprawdzanie duplikatów
-    std::vector<uint8_t> seen_pairs(p_cnt * p_cnt, 0);
-
-    // OPTYMALIZACJA 3: Prekalkulacja fizycznych lokacji dla warstw,
-    // dzięki czemu wewnętrzna pętla wykonuje czystą i szybką matematykę O(1)
-    std::vector<std::pair<int, int>> front_pairs;
-    front_pairs.reserve(front_layer.size());
+    // OPTYMALIZACJA 2: Zamiast fizycznych pair, zapamiętujemy LOGICZNE
+    // Dzięki temu możemy wyeliminować instrukcje 'if' podczas ewaluacji
+    std::vector<std::pair<int, int>> front_logical_pairs;
+    front_logical_pairs.reserve(front_layer.size());
     for (int gate_id : front_layer) {
         const GateNode& n = current_dag.nodes[gate_id];
-        if (n.lq2 != -1) {
-            front_pairs.emplace_back(state.logical_to_phys_qubit[n.lq1], state.logical_to_phys_qubit[n.lq2]);
-        }
+        if (n.lq2 != -1) front_logical_pairs.emplace_back(n.lq1, n.lq2);
     }
 
-    std::vector<std::pair<int, int>> extended_pairs;
-    extended_pairs.reserve(extended_layer.size());
+    std::vector<std::pair<int, int>> ext_logical_pairs;
+    ext_logical_pairs.reserve(extended_layer.size());
     for (int gate_id : extended_layer) {
         const GateNode& n = current_dag.nodes[gate_id];
-        if (n.lq2 != -1) {
-            extended_pairs.emplace_back(state.logical_to_phys_qubit[n.lq1], state.logical_to_phys_qubit[n.lq2]);
-        }
+        if (n.lq2 != -1) ext_logical_pairs.emplace_back(n.lq1, n.lq2);
     }
 
+    // Ekstremalnie szybka lokalna kopia bieżącego mapowania dla O(1) dostępu w cache
+    std::vector<int> current_l2p = state.logical_to_phys_qubit;
+
+    // OPTYMALIZACJA 1: Korzystamy z prekompilowanego, płaskiego wektora ścieżek SwapEdge
     for (int p : active_phys_qubits) {
-        for (int r : topo.qubits[p].connected_resonators) {
-            for (int neighbor_p : topo.resonators[r].connected_qubits) {
-                if (p == neighbor_p) continue;
+        for (const SwapEdge& edge : precomputed_swaps[p]) {
+            int neighbor_p = edge.neighbor;
+            int r = edge.resonator;
 
-                int u = std::min(p, neighbor_p);
-                int v = std::max(p, neighbor_p);
+            int u = std::min(p, neighbor_p);
+            int v = std::max(p, neighbor_p);
 
-                int pair_idx = u * p_cnt + v;
-                // Sprawdzanie duplikatów zajmuje teraz pojedynczą operację na tablicy
-                if (seen_pairs[pair_idx]) continue;
-                seen_pairs[pair_idx] = 1;
+            int pair_idx = u * p_cnt + v;
+            if (seen_pairs[pair_idx]) continue;
+            seen_pairs[pair_idx] = 1;
 
-                double score_F = 0.0;
-                double score_E = 0.0;
+            // Sprawdzamy jakie kubity logiczne zamierzamy podmienić
+            int lq_p = state.phys_qubit_to_logical[p];
+            int lq_neighbor = state.phys_qubit_to_logical[neighbor_p];
 
-                // Ekstremalnie szybka pętla ewaluacyjna (brak if'ów dot. DAG, brak odpytywania mappingu)
-                for (const auto& pr : front_pairs) {
-                    int lq1_p = pr.first;
-                    int lq2_p = pr.second;
-                    // Wirtualny swap
-                    if (lq1_p == p) lq1_p = neighbor_p; else if (lq1_p == neighbor_p) lq1_p = p;
-                    if (lq2_p == p) lq2_p = neighbor_p; else if (lq2_p == neighbor_p) lq2_p = p;
-                    score_F += get_distance(lq1_p, lq2_p);
-                }
+            // Wirtualny swap - operacja w pełni O(1) na tablicy intów
+            if (lq_p != -1) current_l2p[lq_p] = neighbor_p;
+            if (lq_neighbor != -1) current_l2p[lq_neighbor] = p;
 
-                for (const auto& pr : extended_pairs) {
-                    int lq1_p = pr.first;
-                    int lq2_p = pr.second;
-                    // Wirtualny swap
-                    if (lq1_p == p) lq1_p = neighbor_p; else if (lq1_p == neighbor_p) lq1_p = p;
-                    if (lq2_p == p) lq2_p = neighbor_p; else if (lq2_p == neighbor_p) lq2_p = p;
-                    score_E += get_distance(lq1_p, lq2_p);
-                }
-
-                double f_norm = front_layer.empty() ? 0 : (score_F / front_layer.size());
-                double e_norm = extended_layer.empty() ? 0 : (score_E / extended_layer.size());
-
-                double score = (f_norm + EXTENDED_LAYER_WEIGHT * e_norm) * fast_max_sabre(decay[u], decay[v]);
-                candidates.push_back({u, v, r, score});
+            double score_F = 0.0;
+            // Branchless pętla - procesor z łatwością wektoryzuje sumowanie
+            for (const auto& pr : front_logical_pairs) {
+                score_F += get_distance(current_l2p[pr.first], current_l2p[pr.second]);
             }
+
+            double score_E = 0.0;
+            // Branchless pętla
+            for (const auto& pr : ext_logical_pairs) {
+                score_E += get_distance(current_l2p[pr.first], current_l2p[pr.second]);
+            }
+
+            // Cofnięcie wirtualnego swapa
+            if (lq_p != -1) current_l2p[lq_p] = p;
+            if (lq_neighbor != -1) current_l2p[lq_neighbor] = neighbor_p;
+
+            double f_norm = front_layer.empty() ? 0 : (score_F / front_layer.size());
+            double e_norm = extended_layer.empty() ? 0 : (score_E / extended_layer.size());
+
+            double score = (f_norm + EXTENDED_LAYER_WEIGHT * e_norm) * fast_max_sabre(decay[u], decay[v]);
+            candidates.push_back({u, v, r, score});
         }
     }
 
@@ -313,6 +326,7 @@ SwapCandidate SabreRouter::find_best_swap_candidate(const SabreDAG& current_dag,
 void SabreRouter::apply_swap_candidate(const SwapCandidate& candidate, MachineState& state, std::vector<int>& q_logical_depth,
                                        std::vector<RoutingRecord>& log, std::vector<double>& decay, int& out_moves,
                                        int& out_swaps, double& total_routing_cost, bool is_final) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     int p1 = candidate.p1;
     int p2 = candidate.p2;
     int r_step = candidate.r_shared;
@@ -400,11 +414,12 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
     std::vector<int> executable_gates;
     executable_gates.reserve(num_qubits);
 
-    std::vector<bool> in_active(topo.qubits.size(), false);
+    // ZMIANA: std::vector<bool> zastąpione uint8_t
+    std::vector<uint8_t> in_active(topo.qubits.size(), 0);
     std::vector<int> active_phys_qubits;
     active_phys_qubits.reserve(num_qubits);
 
-    std::vector<bool> in_extended(n_gates, false);
+    std::vector<uint8_t> in_extended(n_gates, 0);
     std::vector<int> extended_layer;
     extended_layer.reserve(num_qubits * 4);
 
@@ -460,7 +475,6 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
     if (is_final) {
         for (size_t p = 0; p < topo.qubits.size(); ++p) force_qubit_down(p, -1, state, q_logical_depth, log, out_moves, total_routing_cost, is_final);
 
-        // 1. Sortowanie chronologiczne wyjścia do poprawnego narysowania i walidacji
         std::stable_sort(log.begin(), log.end(), [](const RoutingRecord& a, const RoutingRecord& b) {
             return a.start_time < b.start_time;
         });
@@ -477,10 +491,8 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
         std::cout << "Głębokość warstwowa (Logical Depth): " << max_logical_depth << " [warstw]" << std::endl;
         std::cout << "Koszt routingu (Total Routing Cost): " << total_routing_cost << std::endl;
 
-        // 2. Ładne Rysowanie obwodu
         print_optimized_circuit(log, num_qubits);
 
-        // 3. Walidacja obwodu
         std::cout << "=== WALIDACJA OBWODU LOGICZNEGO ===\n";
         if (!validate_logical_circuit(original_circuit, log)) {
             exit(-1);
@@ -492,6 +504,7 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
 }
 
 void SabreRouter::run_benchmark() {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     std::cout << "Uruchamiam benchmark SABRE (High-Performance Engine)... " << std::endl;
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -509,6 +522,7 @@ void SabreRouter::run_benchmark() {
 }
 
 bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     std::vector<std::vector<std::string>> expected(num_qubits);
     for (const auto& g : orig_circ) {
         if (g.type == "1Q") {
@@ -549,6 +563,7 @@ bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, c
 }
 
 void SabreRouter::print_optimized_circuit(const std::vector<RoutingRecord>& log, int num_logical_qubits) const {
+    // ... Wnętrze funkcji (pozostawione bez zmian) ...
     if (num_logical_qubits <= 0) num_logical_qubits = num_qubits;
     if (log.empty()) { std::cout << "Zoptymalizowany obwód jest pusty!!\n"; return; }
 
@@ -619,7 +634,6 @@ void SabreRouter::print_optimized_circuit(const std::vector<RoutingRecord>& log,
             int max_q = fast_max_sabre(q_in, q_stay);
 
             bool q_in_is_control = false;
-            // Identyfikujemy kontrolny kubit na podst. DAGu
             if (move.gate_id != -1 && move.gate_id < dag.nodes.size()) {
                 q_in_is_control = (move.lq1 == dag.nodes[move.gate_id].lq1);
             }

@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <limits>
 #include <boost/random/xoshiro.hpp>
 
 // --- Struktury wewnątrz hybrydy ---
@@ -28,24 +29,23 @@ struct HybridSabreDAG {
     std::vector<int> initial_deps;
 };
 
-// Globalna struktura do omijania relokacji
-struct SwapCand {
-    int p1, p2, r; double score;
-};
-
+// Zoptymalizowany HybridWorkspace (Usunięto SwapCand, dodano flagi O(1) i pre-alokowane pary)
 struct HybridWorkspace {
     std::vector<int> l2p, p2l, q_on_res, res_occ, q_depth, deps, ready_queue, shared_res;
     std::vector<double> q_time, r_time;
 
-    // Zbuforowane kontenery dla minimalizacji alokacji (recykling w evaluate_fitness)
+    // Zbuforowane kontenery
     std::vector<int> front_layer, exec_gates, ext_layer;
     std::vector<bool> in_ext;
     std::vector<double> decay;
 
-    // Ostatnie usunięte alokacje z de_route_step i de_execute_gates
-    std::vector<uint8_t> in_active; // Zamiast wolnego std::vector<bool>
+    std::vector<uint8_t> in_active;
     std::vector<int> active_phys;
-    std::vector<SwapCand> candidates;
+
+    // NOWE POLA: optymalizacja O(1) dla krawędzi w routingu i wyciągnięte do góry lokacje
+    int route_step_counter = 0;
+    std::vector<int> seen_edges;
+    std::vector<std::pair<int, int>> f_locs, e_locs;
 };
 
 // Stan maszyny wyłącznie dla przebiegu SABRE
@@ -80,7 +80,7 @@ struct DERunContext {
     int out_swaps = 0;
     int out_moves = 0;
     double total_routing_cost = 0.0;
-    HybridWorkspace& ws; // Podpięcie całego workspace'u
+    HybridWorkspace& ws;
 
     DERunContext(HybridWorkspace& w)
         : l2p(w.l2p), p2l(w.p2l), q_on_res(w.q_on_res),

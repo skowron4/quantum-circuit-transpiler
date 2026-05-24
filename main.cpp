@@ -23,7 +23,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
     // Generowanie obwodu testowego
-    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(10000000, 0.25, 0.15);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
@@ -34,7 +34,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // 2. Wykonanie algorytmu optymalizacyjnego (Differential Evolution)
     // DifferentialEvolution de_router(qpu, circuit, qpu.get_num_qubits(), name);
     // de_router.optimize(100, 2000000);
-    // de_router.optimize_windowed(30, 1000, 100, 0.35, qpu.get_num_qubits()); //30, 1000, 100, 0.35
+    // de_router.optimize_windowed(100, 30000, 200, 1.0, qpu.get_num_qubits()); //30, 1000, 100, 0.35
 
     // 3. Wykonanie algorytmu SABRE
     // SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
@@ -42,7 +42,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
 
     // 4. Wykonanie algorytmu DEHybridSabre
      SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name);
-     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, false);
+     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, false, 0.2);
 }
 
 int main() {

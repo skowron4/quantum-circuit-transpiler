@@ -26,25 +26,34 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
     std::reverse(reversed_circuit.begin(), reversed_circuit.end());
     reversed_dag = build_dag(reversed_circuit);
 
-    // Pre-alokacja workspace, aby uniknąć re-alokacji podczas ewaluacji
-    workspace.l2p.reserve(p_cnt);
-    workspace.p2l.reserve(p_cnt);
-    workspace.q_on_res.reserve(p_cnt);
-    workspace.res_occ.reserve(r_cnt);
-    workspace.q_depth.reserve(p_cnt);
-    workspace.q_time.reserve(p_cnt);
-    workspace.r_time.reserve(r_cnt);
+    // [OPTYMALIZACJA 4] Pełne resize() dla struktury workspace w celu wykorzystania std::fill w evaluate_fitness_impl
+    workspace.l2p.resize(p_cnt, -1);
+    workspace.p2l.resize(p_cnt, -1);
+    workspace.q_on_res.resize(p_cnt, -1);
+    workspace.res_occ.resize(r_cnt, -1);
+    workspace.q_depth.resize(p_cnt, 0);
+    workspace.q_time.resize(p_cnt, 0.0);
+    workspace.r_time.resize(r_cnt, 0.0);
+
     workspace.front_layer.reserve(g_cnt);
     workspace.exec_gates.reserve(p_cnt);
     workspace.ext_layer.reserve(g_cnt);
-    workspace.in_ext.reserve(g_cnt);
-    workspace.decay.reserve(p_cnt);
 
-    // Nowe rezerwacje
+    workspace.in_ext.resize(g_cnt, false);
+    workspace.decay.resize(p_cnt, 1.0);
+    workspace.deps.resize(g_cnt, 0);
+
     workspace.shared_res.reserve(r_cnt);
-    workspace.in_active.reserve(p_cnt);
+    workspace.in_active.resize(p_cnt, 0);
     workspace.active_phys.reserve(p_cnt);
-    workspace.candidates.reserve(p_cnt * 4);
+
+    // [OPTYMALIZACJA 1] Pre-alokacja dla seen_edges
+    workspace.route_step_counter = 0;
+    workspace.seen_edges.assign(p_cnt * p_cnt, 0);
+
+    // [OPTYMALIZACJA 2] Pre-alokacja do hoistingu
+    workspace.f_locs.reserve(g_cnt);
+    workspace.e_locs.reserve(g_cnt);
 }
 
 int SabreDEHybridRouter::get_distance(int p1, int p2) const {
@@ -89,16 +98,6 @@ HybridSabreDAG SabreDEHybridRouter::build_dag(const std::vector<Gate>& circuit) 
     for (size_t i = 0; i < local_dag.nodes.size(); ++i) local_dag.initial_deps[i] = local_dag.nodes[i].deps_count;
     return local_dag;
 }
-
-// =========================================================================
-//                              SABRE SEED
-// =========================================================================
-// [Tutaj bez zmian funkcje sabre_force_qubit_down, sabre_execute_gates,
-//  sabre_route_step i run_sabre_pass - pozostają identyczne z oryginałem]
-
-// =========================================================================
-//                              DE SEED
-// =========================================================================
 
 template <bool LOGGING>
 void SabreDEHybridRouter::de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
@@ -215,7 +214,7 @@ void SabreDEHybridRouter::de_execute_gates(const HybridSabreDAG& current_dag, st
 
 template <bool LOGGING>
 bool SabreDEHybridRouter::de_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<int>& ext_layer, std::vector<double>& decay, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log) {
-    ctx.ws.in_active.assign(topo.qubits.size(), 0);
+    std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
     ctx.ws.active_phys.clear();
 
     for (int gid : front_layer) {
@@ -230,51 +229,79 @@ bool SabreDEHybridRouter::de_route_step(const HybridSabreDAG& current_dag, const
         }
     }
 
-    ctx.ws.candidates.clear();
+    // [OPTYMALIZACJA 2] Hoisting - wyciągamy lokalizacje logiczne raz przez podwójnymi pętlami
+    ctx.ws.f_locs.clear();
+    for (int gid : front_layer) {
+        const auto& node = current_dag.nodes[gid];
+        if (node.lq2 != -1) {
+            ctx.ws.f_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+        }
+    }
+
+    ctx.ws.e_locs.clear();
+    for (int gid : ext_layer) {
+        const auto& node = current_dag.nodes[gid];
+        if (node.lq2 != -1) {
+            ctx.ws.e_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+        }
+    }
+
+    // [OPTYMALIZACJA 1] Zastąpienie wektora candidates śledzeniem w locie (O(1))
+    ctx.ws.route_step_counter++;
+    int step_id = ctx.ws.route_step_counter;
+    int p_cnt = topo.qubits.size();
+
+    double best_score = std::numeric_limits<double>::max();
+    int best_p1 = -1, best_p2 = -1, best_r = -1;
 
     for (int p : ctx.ws.active_phys) {
         for (int r : topo.qubits[p].connected_resonators) {
             for (int nb : topo.resonators[r].connected_qubits) {
                 if (p == nb) continue;
                 int u = std::min(p, nb), v = std::max(p, nb);
-                bool added = false;
-                for (const auto& c : ctx.ws.candidates) if (c.p1 == u && c.p2 == v) { added = true; break; }
-                if (added) continue;
+
+                // O(1) sprawdzenie duplikatu
+                int edge_idx = u * p_cnt + v;
+                if (ctx.ws.seen_edges[edge_idx] == step_id) continue;
+                ctx.ws.seen_edges[edge_idx] = step_id;
 
                 double sF = 0, sE = 0;
-                for (int gid : front_layer) {
-                    if (current_dag.nodes[gid].lq2 != -1) {
-                        int l1 = ctx.l2p[current_dag.nodes[gid].lq1], l2 = ctx.l2p[current_dag.nodes[gid].lq2];
-                        if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
-                        if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
-                        sF += get_distance(l1, l2);
-                    }
+
+                // Zużycie shostowanych lokacji (zero przeskakiwania po DAG)
+                for (const auto& loc : ctx.ws.f_locs) {
+                    int l1 = loc.first, l2 = loc.second;
+                    if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
+                    if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
+                    sF += get_distance(l1, l2);
                 }
-                for (int gid : ext_layer) {
-                    if (current_dag.nodes[gid].lq2 != -1) {
-                        int l1 = ctx.l2p[current_dag.nodes[gid].lq1], l2 = ctx.l2p[current_dag.nodes[gid].lq2];
-                        if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
-                        if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
-                        sE += get_distance(l1, l2);
-                    }
+                for (const auto& loc : ctx.ws.e_locs) {
+                    int l1 = loc.first, l2 = loc.second;
+                    if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
+                    if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
+                    sE += get_distance(l1, l2); // Wymienione sF na poprawne sE względem błędu u źródła
                 }
+
                 double mutation = 0.95 + (genes[u % n_gates] * 0.1);
                 double score = ((front_layer.empty() ? 0 : sF / front_layer.size()) + EXTENDED_LAYER_WEIGHT * (ext_layer.empty() ? 0 : sE / ext_layer.size())) * fast_max_hyb(decay[u], decay[v]) * mutation;
-                ctx.ws.candidates.push_back({u, v, r, score});
+
+                if (score < best_score) {
+                    best_score = score;
+                    best_p1 = u; best_p2 = v; best_r = r;
+                }
             }
         }
     }
 
-    SwapCand* best = nullptr;
-    if (!ctx.ws.candidates.empty()) {
-        best = &ctx.ws.candidates[0];
-        for (size_t i = 1; i < ctx.ws.candidates.size(); ++i) if (ctx.ws.candidates[i].score < best->score) best = &ctx.ws.candidates[i];
-    }
+    if (best_p1 != -1) {
+        int p1 = best_p1, p2 = best_p2, r_step = best_r;
 
-    if (best) {
-        int p1 = best->p1, p2 = best->p2, r_step = best->r;
         de_force_down<LOGGING>(p1, -1, ctx, genes, n_gates, out_log, false);
         de_force_down<LOGGING>(p2, -1, ctx, genes, n_gates, out_log, false);
+
+        if (ctx.res_occ[r_step] != -1) {
+            int r_occ = ctx.res_occ[r_step];
+            de_force_down<LOGGING>(r_occ, -1, ctx, genes, n_gates, out_log, false);
+        }
 
         double step_start = fast_max_hyb(ctx.q_time[p1], fast_max_hyb(ctx.r_time[r_step], ctx.q_time[p2]));
         bool is_move = (ctx.p2l[p2] == -1) || (ctx.p2l[p1] == -1);
@@ -315,27 +342,31 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
     int r_cnt = topo.resonators.size();
     out_swaps = 0; out_moves = 0; max_physical_time = 0.0; max_logical_depth = 0;
 
-    // Praca na pre-alokowanym obiekcie (recykling zasobów z workspace)
     DERunContext ctx(workspace);
-    ctx.l2p = saved_initial_l2p;
-    ctx.p2l.assign(p_cnt, -1);
+
+    // [OPTYMALIZACJA 4] Zastąpienie std::vector::assign szybkimi std::copy i std::fill
+    std::copy(saved_initial_l2p.begin(), saved_initial_l2p.end(), ctx.l2p.begin());
+    std::fill(ctx.p2l.begin(), ctx.p2l.end(), -1);
+
     for (int i = 0; i < num_qubits; ++i) if (ctx.l2p[i] != -1) ctx.p2l[ctx.l2p[i]] = i;
 
-    ctx.q_on_res.assign(p_cnt, -1);
-    ctx.res_occ.assign(r_cnt, -1);
-    ctx.q_time.assign(p_cnt, 0.0);
-    ctx.r_time.assign(r_cnt, 0.0);
-    ctx.q_depth.assign(p_cnt, 0);
+    std::fill(ctx.q_on_res.begin(), ctx.q_on_res.end(), -1);
+    std::fill(ctx.res_occ.begin(), ctx.res_occ.end(), -1);
+    std::fill(ctx.q_time.begin(), ctx.q_time.end(), 0.0);
+    std::fill(ctx.r_time.begin(), ctx.r_time.end(), 0.0);
+    std::fill(ctx.q_depth.begin(), ctx.q_depth.end(), 0);
 
     if (out_log) { out_log->clear(); }
 
     workspace.front_layer.clear();
-    workspace.deps = dag.initial_deps;
+    std::copy(dag.initial_deps.begin(), dag.initial_deps.end(), workspace.deps.begin());
+
     for (int i = 0; i < n_gates; ++i) if (workspace.deps[i] == 0) workspace.front_layer.push_back(i);
 
-    workspace.decay.assign(p_cnt, 1.0);
+    std::fill(workspace.decay.begin(), workspace.decay.end(), 1.0);
     int gates_routed = 0;
-    workspace.in_ext.assign(n_gates, false);
+
+    std::fill(workspace.in_ext.begin(), workspace.in_ext.end(), false);
 
     while (gates_routed < n_gates) {
         workspace.exec_gates.clear();
@@ -381,10 +412,6 @@ double SabreDEHybridRouter::evaluate_fitness(const double* genes, int& out_swaps
     return evaluate_fitness_impl<false>(genes, out_swaps, out_moves, max_physical_time, max_logical_depth, nullptr, can_lazy_offboard);
 }
 
-// =========================================================================
-//                          HYBRID ALGORITHMS
-// =========================================================================
-
 void SabreDEHybridRouter::initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy) {
     boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
     std::vector<double> sabre_genes(n_genes, 0.5);
@@ -400,7 +427,6 @@ void SabreDEHybridRouter::initialize_de_population(int pop_size, int n_genes, in
     for (int i = 0; i < pop_size; ++i) {
         for (int j = 0; j < n_genes; ++j) trial[j] = pop[i * n_genes + j] = (i == 0) ? sabre_genes[j] : dist_real(rng);
 
-        // Zero-copy: przekazanie wskaźnika
         fitness[i] = evaluate_fitness(trial.data(), d_s, d_m, d_t, d_d, nullptr, can_lazy);
 
         if (i == 0) {
@@ -468,14 +494,13 @@ void SabreDEHybridRouter::optimize(int pop_size, int generations, bool allow_laz
     std::vector<RoutingRecord> final_log;
     int final_swaps = 0, final_moves = 0, final_depth = 0; double final_makespan = 0.0;
 
-    // Przekazanie adresu najlepszego genotypu z bufora wektora, unikanie niepotrzebnej kopii
     double final_score = evaluate_fitness(pop.data() + best_idx * n_genes, final_swaps, final_moves, final_makespan, final_depth, &final_log, can_lazy);
 
     std::cout << "\n=== WALIDACJA OBWODU LOGICZNEGO ===\n";
     if (!validate_logical_circuit(final_log)) exit(-1);
     std::cout << "===================================\n";
 
-    print_optimized_circuit(final_log);
+    // print_optimized_circuit(final_log);
     print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, std::chrono::duration<double>(end_time - start_time).count());
     export_moves_to_file(final_log, "../hybrid_schedule_moves_" + name + ".txt");
 }
@@ -517,7 +542,6 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
                 for (int g = w_start; g < accept_end; ++g) pop[i * n_genes + blk * n_gates + g] = pop[best_idx * n_genes + blk * n_gates + g];
             }
 
-            // Zero-copy: brak niepotrzebnego wektora ind, przekazujemy offset z surowej pamięci pop
             fitness[i] = evaluate_fitness(pop.data() + i * n_genes, d_s, d_m, d_t, d_d, nullptr, can_lazy);
         }
     }
@@ -529,7 +553,6 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
     std::vector<RoutingRecord> final_log;
     int final_swaps = 0, final_moves = 0, final_depth = 0; double final_makespan = 0.0;
 
-    // Podobnie tutaj – pracujemy na offsecie
     double final_score = evaluate_fitness(pop.data() + best_idx * n_genes, final_swaps, final_moves, final_makespan, final_depth, &final_log, can_lazy);
 
     std::cout << "\n=== WALIDACJA OBWODU LOGICZNEGO ===\n";
@@ -567,11 +590,6 @@ void SabreDEHybridRouter::generate_trial_vector_windowed(const std::vector<doubl
         trial[j] = (gate_id >= w_start && gate_id < w_end && (dist_real(rng) < cr || j == R)) ? std::clamp(p_a[j] + f * (p_b[j] - p_c[j]), 0.0, 1.0) : p_curr[j];
     }
 }
-
-
-// =========================================================================
-//                              SABRE SEED
-// =========================================================================
 
 void SabreDEHybridRouter::sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx) {
     if (ctx.state.q_on_resonator[p] != -1) {
@@ -856,14 +874,6 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
     return ctx.state.logical_to_phys_qubit;
 }
 
-// =========================================================================
-//                              DE SEED
-// =========================================================================
-
-// =========================================================================
-//                          HYBRID ALGORITHMS
-// =========================================================================
-
 std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
     std::vector<int> initial_mapping(num_qubits);
     saved_initial_l2p.assign(topo.qubits.size(), -1);
@@ -876,10 +886,6 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
     run_sabre_pass(dag, pre_final, true, &logical_exec_order);
     return logical_exec_order;
 }
-
-// =========================================================================
-//                               UTILS
-// =========================================================================
 
 bool SabreDEHybridRouter::validate_logical_circuit(const std::vector<RoutingRecord>& log) const {
     std::vector<std::vector<std::string>> expected(num_qubits);
