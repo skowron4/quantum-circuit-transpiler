@@ -89,8 +89,8 @@ void DifferentialEvolution::optimize(int pop_size, int generations, int num_logi
     // Opcjonalny 4. blok DODAJEMY TYLKO, jeśli są w ogóle jakieś wolne fizyczne kubity
     int logical_q = (num_logical_qubits <= 0) ? num_qubits : num_logical_qubits;
 
-    if (bool can_lazy_offboard = (logical_q < topo.qubits.size())) {
-        n_genes = grouped_nodes.size() * 4;
+    if (logical_q < topo.qubits.size()) {
+        n_genes = grouped_nodes.size() * 4; // lub n_gates * 4 w wersji windowed
         std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
     }
 
@@ -168,6 +168,12 @@ void DifferentialEvolution::select_distinct_parents(int current_idx, int pop_siz
     do { c = dist_int(rng); } while (c == current_idx || c == a || c == b);
 }
 
+inline double fast_clamp(double val, double min_val, double max_val) {
+    if (val < min_val) return min_val;
+    if (val > max_val) return max_val;
+    return val;
+}
+
 void DifferentialEvolution::generate_trial_vector(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, double f, double cr, boost::random::xoshiro256pp& rng) {
     boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
     boost::random::uniform_int_distribution<int> dist_gene(0, n_genes - 1);
@@ -186,7 +192,7 @@ void DifferentialEvolution::generate_trial_vector(const std::vector<double>& pop
         bool mutate = (dist_real(rng) < cr || j == R);
         double mutated_val = p_a[j] + f * (p_b[j] - p_c[j]);
         // Zastąpienie if/else potężnie wspiera CPU branch predictor (cmov w x86)
-        p_trial[j] = mutate ? std::clamp(mutated_val, 0.0, 1.0) : p_curr[j];
+        p_trial[j] = mutate ? fast_clamp(mutated_val, 0.0, 1.0) : p_curr[j];
     }
 }
 
@@ -221,14 +227,14 @@ void DifferentialEvolution::process_and_export_best_solution(const std::vector<d
 }
 
 void DifferentialEvolution::print_statistics(double best_score, int swaps, int moves, double physical_time, int depth, double exec_time) {
-    std::cout << "\n=== STATYSTYKI PO ZAKONCZENIU OPTYMALIZACJI ===\n";
+    std::cout << "\n=== STATYSTYKI PO ZAKONCZENIU OPTYMALIZACJI DE ===\n";
     std::cout << "Najlepszy znaleziony koszt (Funkcja celu z wagami): " << best_score << "\n";
     std::cout << "Wykorzystane operacje SWAP: " << swaps << "\n";
     std::cout << "Wykorzystane operacje MOVE: " << moves << "\n";
     std::cout << "Czas fizyczny obwodu (Makespan / Physical Time): " << physical_time << " [jednostek]\n";
     std::cout << "Głębokość warstwowa (Logical Depth / Layers): " << depth << " [warstw]\n";
     std::cout << "Czas wykonania algorytmu: " << exec_time << " sekund\n";
-    std::cout << "===============================================\n\n";
+    std::cout << "==================================================\n\n";
 }
 
 inline double fast_max(double a, double b) {
@@ -252,9 +258,16 @@ double DifferentialEvolution::evaluate_fitness_impl(const vector<double>& genes,
 
     prepare_workspaces(n_gates, out_log);
 
-    auto cmp = [&genes](int left, int right) { return genes[left] < genes[right]; };
+    const double* genes_ptr = genes.data();
+
+    auto cmp = [genes_ptr](int left, int right) {
+        return genes_ptr[left] < genes_ptr[right];
+    };
 
     ready_queue_workspace.clear();
+    if (ready_queue_workspace.capacity() < n_gates) {
+        ready_queue_workspace.reserve(n_gates);
+    }
     for (int i = 0; i < n_gates; ++i) {
         deps_workspace[i] = grouped_nodes[i].deps_count;
         if (deps_workspace[i] == 0) ready_queue_workspace.push_back(i);
@@ -359,29 +372,26 @@ void DifferentialEvolution::force_qubit_down(int& p, int current_gate_id, const 
 
     // Punkt 2 w akcji - tanie sprawdzenie flagi zamiast .size()
     if (current_gate_id >= 0 && can_lazy_offboard) {
+        int valid_cands[32];
+        valid_cands[0] = p;
         int valid_count = 1;
+
         const auto& connected = topo.resonators[r].connected_qubits;
 
         for (int p_cand : connected) {
             if (p_cand != p && state_workspace.phys_qubit_to_logical[p_cand] == -1 && state_workspace.q_on_resonator[p_cand] == -1) {
-                valid_count++;
+                valid_cands[valid_count++] = p_cand;
             }
         }
 
         if (valid_count > 1) {
             double gene_val = genes[n_gates * 3 + current_gate_id];
             int target_idx = static_cast<int>(gene_val * valid_count);
+
+            // Zabezpieczenie (tak jak miałeś)
             if (target_idx >= valid_count) target_idx = valid_count - 1;
 
-            if (target_idx > 0) {
-                int curr_idx = 1;
-                for (int p_cand : connected) {
-                    if (p_cand != p && state_workspace.phys_qubit_to_logical[p_cand] == -1 && state_workspace.q_on_resonator[p_cand] == -1) {
-                        if (curr_idx == target_idx) { target_p = p_cand; break; }
-                        curr_idx++;
-                    }
-                }
-            }
+            target_p = valid_cands[target_idx];
         }
     }
 
@@ -555,9 +565,13 @@ void DifferentialEvolution::process_routing_path(const GateNode& node, const Rou
         int r_step = path.resonators[i];
         int next_p = path.qubits[i+1];
 
-        int occ = next_p;
-        force_qubit_down<LOGGING>(occ, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+        int occ_next = next_p;
+        force_qubit_down<LOGGING>(occ_next, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
 
+        if (state_workspace.res_occupant[r_step] != -1) {
+            int occ_res = state_workspace.res_occupant[r_step];
+            force_qubit_down<LOGGING>(occ_res, node.id, genes, n_gates, out_moves, total_routing_cost, out_log, can_lazy_offboard);
+        }
         double step_start = fast_max(state_workspace.q_ready_time[current_p], fast_max(state_workspace.r_ready_time[r_step], state_workspace.q_ready_time[next_p]));
         bool is_move = (state_workspace.phys_qubit_to_logical[next_p] == -1);
         double op_cost = is_move ? (2.0 * MOVE_COST) : SWAP_COST;
@@ -803,6 +817,134 @@ bool DifferentialEvolution::validate_logical_circuit(const std::vector<Gate>& or
         std::cout << "[OK] Walidacja pomyślna. Obwód wyjściowy zachowuje semantykę logiczną obwodu wejściowego.\n";
     }
     return is_valid;
+}
+
+void DifferentialEvolution::optimize_windowed(int pop_size, int generations_per_window, int window_size, double accept_ratio, int num_logical_qubits, double f, double cr) {
+    std::cout << "Rozpoczynam optymalizacje DE (Oknem przesuwnym: " << window_size
+              << " bramek, akceptacja: " << (accept_ratio * 100) << "%)... (proszę czekać)\n";
+
+    int n_gates = grouped_nodes.size();
+    int n_genes = n_gates * 3;
+    int logical_q = (num_logical_qubits <= 0) ? num_qubits : num_logical_qubits;
+
+    if (logical_q < topo.qubits.size()) {
+        n_genes = grouped_nodes.size() * 4; // lub n_gates * 4 w wersji windowed
+        std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
+    }
+
+    if (n_genes == 0) {
+        std::cout << "Obwód jest pusty lub preprocesing zawiódł!\n";
+        return;
+    }
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // 1. Inicjalizacja populacji - wszystkie geny dostają randoma na start
+    std::vector<double> pop(pop_size * n_genes);
+    std::vector<double> fitness(pop_size);
+    boost::random::xoshiro256pp rng(1337);
+
+    initialize_population(pop, fitness, pop_size, n_genes, rng);
+
+    // Wyliczamy ile bramek zamrażamy w każdym kroku (np. 50 z okna 100)
+    int step = std::max(1, static_cast<int>(window_size * accept_ratio));
+
+    // 2. Ślizgamy się po obwodzie
+    for (int w_start = 0; w_start < n_gates; w_start += step) {
+        int w_end = std::min(w_start + window_size, n_gates);
+        std::cout << ">>> Przetwarzanie okna: bramki [" << w_start << " - " << w_end - 1 << "] / " << n_gates << "\n";
+
+        // Odpalamy ewolucję tylko dla genów z aktualnego okna
+        run_evolution_loop_windowed(pop, fitness, pop_size, generations_per_window, n_genes, n_gates, f, cr, rng, w_start, w_end);
+
+        // Znajdujemy najlepszego mocarza z tego okna
+        auto best_iter = ranges::min_element(fitness);
+        int best_idx = std::distance(fitness.begin(), best_iter);
+
+        // Kopiujemy jego ZAACKEPTOWANE decyzje (od w_start do w_start + step) do WSZYSTKICH osobników.
+        // W ten sposób cała populacja ma wspólną zoptymalizowaną przeszłość i skupia się tylko na przyszłości.
+        int accept_end = std::min(w_start + step, n_gates);
+        int num_blocks = n_genes / n_gates;
+
+        for (int i = 0; i < pop_size; ++i) {
+            if (i == best_idx) continue;
+            for (int blk = 0; blk < num_blocks; ++blk) {
+                for (int g = w_start; g < accept_end; ++g) {
+                    int gene_idx = blk * n_gates + g;
+                    pop[i * n_genes + gene_idx] = pop[best_idx * n_genes + gene_idx];
+                }
+            }
+            // Zmieniliśmy im geny (przeszłość), więc musimy przeliczyć ich fitness na nowy start
+            std::vector<double> ind(pop.begin() + i * n_genes, pop.begin() + (i + 1) * n_genes);
+            int ds, dm, dd; double dt;
+            fitness[i] = evaluate_fitness(ind, ds, dm, dt, dd, nullptr);
+        }
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> execution_time = end_time - start_time;
+
+    // 3. Eksport całości
+    process_and_export_best_solution(pop, fitness, n_genes, num_logical_qubits, execution_time.count());
+}
+
+void DifferentialEvolution::run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end) {
+    boost::random::uniform_int_distribution<int> dist_int(0, pop_size - 1);
+    std::vector<double> trial(n_genes);
+
+    int d_swaps, d_moves, d_depth;
+    double d_time;
+
+    for (int gen = 0; gen < generations; ++gen) {
+        for (int i = 0; i < pop_size; ++i) {
+            int a, b, c;
+            select_distinct_parents(i, pop_size, rng, dist_int, a, b, c);
+
+            // Tutaj magia - mutujemy tylko to co jest w oknie [w_start, w_end)
+            generate_trial_vector_windowed(pop, trial, i, a, b, c, n_genes, n_gates, f, cr, rng, w_start, w_end);
+
+            double trial_fitness = evaluate_fitness(trial, d_swaps, d_moves, d_time, d_depth, nullptr);
+            if (trial_fitness < fitness[i]) {
+                std::copy(trial.begin(), trial.end(), pop.begin() + i * n_genes);
+                fitness[i] = trial_fitness;
+            }
+        }
+    }
+}
+
+void DifferentialEvolution::generate_trial_vector_windowed(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end) {
+    boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
+
+    // Losujemy indeks 'R' wymuszający mutację, ale musi on spaść z puli aktywnych genów!
+    int num_blocks = n_genes / n_gates;
+    int active_size = (w_end - w_start) * num_blocks;
+    boost::random::uniform_int_distribution<int> dist_active(0, active_size - 1);
+
+    int R_idx = dist_active(rng);
+    int R_block = R_idx / (w_end - w_start);
+    int R_gate = w_start + (R_idx % (w_end - w_start));
+    int R = R_block * n_gates + R_gate; // Rzeczywisty indeks upewniający, że wylosowaliśmy aktywny gen
+
+    const double* __restrict p_pop = pop.data();
+    double* __restrict p_trial = trial.data();
+    const double* __restrict p_a = p_pop + a * n_genes;
+    const double* __restrict p_b = p_pop + b * n_genes;
+    const double* __restrict p_c = p_pop + c * n_genes;
+    const double* __restrict p_curr = p_pop + current_idx * n_genes;
+
+    for (int j = 0; j < n_genes; ++j) {
+        int gate_id = j % n_gates; // Znajdujemy, do której bramki należy ten konkretny gen
+
+        if (gate_id >= w_start && gate_id < w_end) {
+            // Gen w oknie - lecimy normalną mutacją DE
+            bool mutate = (dist_real(rng) < cr || j == R);
+            double mutated_val = p_a[j] + f * (p_b[j] - p_c[j]);
+            p_trial[j] = mutate ? fast_clamp(mutated_val, 0.0, 1.0) : p_curr[j];
+        } else {
+            // Gen POZA oknem (zamrożony z przeszłości lub czekający w przyszłości) - przepisujemy bez zmian
+            p_trial[j] = p_curr[j];
+        }
+    }
 }
 
 template double DifferentialEvolution::evaluate_fitness_impl<true>(const std::vector<double>&, int&, int&, double&, int&, std::vector<RoutingRecord>*, bool);

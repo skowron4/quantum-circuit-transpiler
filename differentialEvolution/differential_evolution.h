@@ -6,7 +6,6 @@
 #include <vector>
 #include <boost/random/uniform_int_distribution.hpp>
 #include <boost/random/xoshiro.hpp>
-
 #include "structures/routing_record.hpp"
 
 struct GroupedGate {
@@ -55,8 +54,13 @@ private:
     MachineState state_workspace;
     std::vector<int> q_logical_depth_workspace;
     std::vector<int> deps_workspace;
-    std::vector<int> shared_res_workspace;
+    absl::InlinedVector<int, 8> shared_res_workspace;
     std::vector<int> ready_queue_workspace;
+
+    // --- NOWE METODY DO OPTYMALIZACJI OKNOWEJ ---
+    void run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end);
+
+    void generate_trial_vector_windowed(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end);
 
     void prepare_workspaces(int n_gates, std::vector<RoutingRecord>* out_log);
 
@@ -108,6 +112,7 @@ public:
 
     void optimize(int pop_size, int generations, int num_logical_qubits = -1. , double f = 0.8, double cr = 0.9);
 
+    void optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, int num_logical_qubits = -1, double f = 0.8, double cr = 0.9);
 };
 
 #endif //MAGISTERKA_DIFFERENTIAL_EVOLUTION_H

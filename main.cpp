@@ -3,6 +3,7 @@
 #include "generator/CircuitGenerator.h"
 #include "geneticAlgorithm/toSort/swap_evaluator.hpp"
 #include "architecture/IQMTriangleConstellation.h"
+#include "dEHybridSabre/SabreDEHybridRouter.h"
 #include "differentialEvolution/differential_evolution.h"
 #include "sabre/SabreRouter.h"
 #ifdef _WIN32
@@ -22,21 +23,26 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
     // Generowanie obwodu testowego
-    std::vector<Gate> circuit = generator.generate(1000, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
     // 1. Wykonanie algorytmu bazowego (Benchmark zachłanny ASAP)
-    GreedyASAP greedy_router(qpu, circuit, qpu.get_num_qubits(), name);
-    greedy_router.run_benchmark();
+    // GreedyASAP greedy_router(qpu, circuit, qpu.get_num_qubits(), name);
+    // greedy_router.run_benchmark();
 
     // 2. Wykonanie algorytmu optymalizacyjnego (Differential Evolution)
-    DifferentialEvolution de_router(qpu, circuit, qpu.get_num_qubits(), name);
-    de_router.optimize(100, 2000000);
+    // DifferentialEvolution de_router(qpu, circuit, qpu.get_num_qubits(), name);
+    // de_router.optimize(100, 2000000);
+    // de_router.optimize_windowed(30, 1000, 100, 0.35, qpu.get_num_qubits()); //30, 1000, 100, 0.35
 
     // 3. Wykonanie algorytmu SABRE
-    SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
-    sabre.run_benchmark();
+    // SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
+    // sabre.run_benchmark();
+
+    // 4. Wykonanie algorytmu DEHybridSabre
+     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name);
+     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, false);
 }
 
 int main() {

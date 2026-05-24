@@ -51,6 +51,8 @@ set(SOURCES
         greedy/GreedyASAP.h
         sabre/SabreRouter.cpp
         sabre/SabreRouter.h
+        dEHybridSabre/SabreDEHybridRouter.cpp
+        dEHybridSabre/SabreDEHybridRouter.h
 )
 
 add_executable(magisterka ${SOURCES})
