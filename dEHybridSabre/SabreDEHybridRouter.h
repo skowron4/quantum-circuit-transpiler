@@ -126,7 +126,18 @@ private:
     void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, std::vector<int>* out_logical_order);
     bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
 
+    // --- Metody Pomocnicze do ewaluacji (wydzielone z evaluate_fitness_impl) ---
+    void reset_evaluation_state(DERunContext& ctx, std::vector<RoutingRecord>* out_log);
+    void init_front_layer(int n_gates);
+    void extract_executable_gates(DERunContext& ctx);
+    void build_lookahead_layers();
+
     // --- Metody Pomocnicze DE ---
+    template <bool LOGGING>
+    double finalize_evaluation(DERunContext& ctx, const double* genes, int n_gates, int p_cnt,
+                               int& out_swaps, int& out_moves, double& max_physical_time,
+                               int& max_logical_depth, std::vector<RoutingRecord>* out_log);
+
     std::vector<int> prepare_sabre_seed();
     void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);
 

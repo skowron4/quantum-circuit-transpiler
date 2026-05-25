@@ -506,36 +506,20 @@ bool SabreDEHybridRouter::de_route_step(
 }
 
 // ==============================================================================
-// EWALUACJA (evaluate_fitness_impl)
-// Symuluje wykonanie całego obwodu zadanymi genami DE i zwraca ocenę (fitness).
+// 1. SZYBKI RESET STANU
+// Czyści i przygotowuje kontekst przed symulacją.
 // ==============================================================================
-template <bool LOGGING>
-double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
-    int n_gates = dag.nodes.size();
-    int p_cnt = topo.qubits.size();
-
-    // Inicjalizacja statystyk
-    out_swaps = 0;
-    out_moves = 0;
-    max_physical_time = 0.0;
-    max_logical_depth = 0;
-
-    // Kontekst uruchomieniowy. Współdzieli pamięć (workspace), unikając realokacji.
-    DERunContext ctx(workspace);
-
-    // ==============================================================================
-    // 1. SZYBKI RESET STANU
-    // ==============================================================================
-    // std::copy jest zazwyczaj kompilowane do bardzo wydajnego memmove.
+inline void SabreDEHybridRouter::reset_evaluation_state(DERunContext& ctx, std::vector<RoutingRecord>* out_log) {
+    // Kopiowanie początkowego mapowania logicznego na fizyczne (szybkie memmove)
     std::copy(saved_initial_l2p.begin(), saved_initial_l2p.end(), ctx.l2p.begin());
     std::fill(ctx.p2l.begin(), ctx.p2l.end(), -1);
 
+    // Odwrotne mapowanie
     for (int i = 0; i < num_qubits; ++i) {
         if (ctx.l2p[i] != -1) ctx.p2l[ctx.l2p[i]] = i;
     }
 
-    // Resetowanie tablic pomocniczych.
-    // UWAGA: Jeśli to wąskie gardło, rozważ inicjalizację tylko używanych indeksów (jeśli możliwe).
+    // Resetowanie tablic pomocniczych stanu kubitów i rezonatorów
     std::fill(ctx.q_on_res.begin(), ctx.q_on_res.end(), -1);
     std::fill(ctx.res_occ.begin(), ctx.res_occ.end(), -1);
     std::fill(ctx.q_time.begin(), ctx.q_time.end(), 0.0);
@@ -543,126 +527,120 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
     std::fill(ctx.q_depth.begin(), ctx.q_depth.end(), 0);
 
     if (out_log) { out_log->clear(); }
+}
 
-    // ==============================================================================
-    // 2. PRZYGOTOWANIE WARSTWY FRONTOWEJ (FRONT LAYER)
-    // ==============================================================================
+// ==============================================================================
+// 2. PRZYGOTOWANIE WARSTWY FRONTOWEJ
+// Znajduje bramki początkowe (stopień wejściowy = 0) na start symulacji.
+// ==============================================================================
+inline void SabreDEHybridRouter::init_front_layer(int n_gates) {
     workspace.front_layer.clear();
     std::copy(dag.initial_deps.begin(), dag.initial_deps.end(), workspace.deps.begin());
 
-    // Zbieramy bramki bez zależności (stopień wejściowy == 0)
+    // Zbieramy bramki bez zależności wjazdowych
     for (int i = 0; i < n_gates; ++i) {
         if (workspace.deps[i] == 0) workspace.front_layer.push_back(i);
     }
 
     std::fill(workspace.decay.begin(), workspace.decay.end(), 1.0);
-    int gates_routed = 0;
 
-    // Inkrementacja epoki BFS w O(1) zamiast std::fill(O(N)) na in_ext.
-    // Wymaga, aby workspace.visited_epoch było typu int i wyzerowane raz w konstruktorze.
+    // Inkrementacja epoki BFS na starcie (O(1) reset stanu w in_ext)
     workspace.current_bfs_epoch++;
+}
 
-    // ==============================================================================
-    // 3. GŁÓWNA PĘTLA SYMULACJI OBWODU
-    // ==============================================================================
-    while (gates_routed < n_gates) {
-        workspace.exec_gates.clear();
+// ==============================================================================
+// 3. WYCIĄGANIE GOTOWYCH BRAMEK (TWO-POINTERS OPTIMIZATION)
+// Filtruje front_layer przenosząc gotowe bramki do exec_gates w miejscu.
+// ==============================================================================
+inline void SabreDEHybridRouter::extract_executable_gates(DERunContext& ctx) {
+    workspace.exec_gates.clear();
+    size_t write_idx = 0;
 
-        // OPTYMALIZACJA: Zamiast podmieniać elementy z .back() i robić pop_back() w locie,
-        // filtrujemy wektor w miejscu używając techniki Two-Pointers (wskaźnik odczytu i zapisu).
-        // Dzięki temu utrzymujemy strukturę ciągłą i minimalizujemy branch misprediction.
-        size_t write_idx = 0;
-        for (size_t read_idx = 0; read_idx < workspace.front_layer.size(); ++read_idx) {
-            int g_id = workspace.front_layer[read_idx];
-            const auto& node = dag.nodes[g_id];
+    for (size_t read_idx = 0; read_idx < workspace.front_layer.size(); ++read_idx) {
+        int g_id = workspace.front_layer[read_idx];
+        const auto& node = dag.nodes[g_id];
 
-            // Short-circuiting: Najpierw sprawdzamy lq2 (najtańszy warunek).
-            // get_distance to zakładam szybkie odpytanie z prekomputowanej tablicy płaskiej 1D: dist[p1 * p_cnt + p2].
-            bool exec = (node.lq2 == -1);
-            if (!exec) {
-                int p1 = ctx.l2p[node.lq1];
-                int p2 = ctx.l2p[node.lq2];
-                // Wykonujemy tylko jeśli oba kubity logiczne są zmapowane na fizyczne i są sąsiadami.
-                exec = (p1 != -1 && p2 != -1 && get_distance(p1, p2) <= 1);
-            }
-
-            if (exec) {
-                workspace.exec_gates.push_back(g_id);
-            } else {
-                // Jeśli bramki NIE da się wykonać, zostawiamy ją w front_layer
-                workspace.front_layer[write_idx++] = g_id;
-            }
-        }
-        // Ucięcie front_layer do nowej długości (usuwa wykonane bramki w O(1))
-        workspace.front_layer.resize(write_idx);
-
-        // Jeśli są bramki do wykonania, wykonaj je i przejdź do następnego cyklu
-        if (!workspace.exec_gates.empty()) {
-            de_execute_gates<LOGGING>(dag, workspace.exec_gates, workspace.front_layer, workspace.deps, ctx, genes, n_gates, out_log, can_lazy_offboard);
-            gates_routed += workspace.exec_gates.size();
-            std::fill(workspace.decay.begin(), workspace.decay.end(), 1.0);
-            continue;
+        // Sprawdzenie możliwości wykonania: operacja 1-kubitowa lq2 == -1
+        // LUB sąsiedztwo dla operacji 2-kubitowych
+        bool exec = (node.lq2 == -1);
+        if (!exec) {
+            int p1 = ctx.l2p[node.lq1];
+            int p2 = ctx.l2p[node.lq2];
+            exec = (p1 != -1 && p2 != -1 && get_distance(p1, p2) <= 1);
         }
 
-        // ==============================================================================
-        // 4. BUDOWANIE LOOKAHEAD (Płaska struktura BFS z Licznikiem Epok)
-        // ==============================================================================
-        workspace.flat_lookahead_layers.clear();
-        workspace.lookahead_offsets.clear();
-        workspace.lookahead_offsets.push_back(0);
-
-        // O(1) resetowanie odwiedzin poprzez nową epokę!
-        workspace.current_bfs_epoch++;
-
-        // Zaznaczamy warstwę frontową jako odwiedzoną w tej epoce
-        for (int gid : workspace.front_layer) {
-            workspace.visited_epoch[gid] = workspace.current_bfs_epoch;
-        }
-
-        workspace.exec_gates = workspace.front_layer;
-
-        // BFS: Iterujemy po głębokości (warstwach), ograniczając max_look_ahead_depth
-        for (size_t depth = 0; depth < max_look_ahead_depth && !workspace.exec_gates.empty(); ++depth) {
-            workspace.ext_layer.clear();
-
-            for (int gid : workspace.exec_gates) {
-                for (int nxt : dag.nodes[gid].next_gates) {
-                    // SZYBKIE SPRAWDZENIE: Czy bramka została odwiedzona w BIEŻĄCEJ epoce?
-                    if (workspace.visited_epoch[nxt] != workspace.current_bfs_epoch) {
-                        workspace.visited_epoch[nxt] = workspace.current_bfs_epoch; // Zaznacz jako odwiedzoną
-                        workspace.ext_layer.push_back(nxt);
-                        workspace.flat_lookahead_layers.push_back(nxt); // Zrzut do płaskiego bufora
-                    }
-                }
-            }
-
-            // Jeśli wygenerowaliśmy nową warstwę, rejestrujemy offset
-            if (!workspace.ext_layer.empty()) {
-                workspace.lookahead_offsets.push_back(workspace.flat_lookahead_layers.size());
-            }
-
-            // Swap zamiast przypisania z kopią - drastycznie obniża czas dla dużych wektorów
-            std::swap(workspace.exec_gates, workspace.ext_layer);
-        }
-
-        workspace.exec_gates.clear();
-        workspace.ext_layer.clear();
-
-        // Krok decyzyjny (np. wstawianie SWAP-ów, routing heurystyczny DE)
-        if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) {
-            break; // Przerwanie, jeśli router zablokował się i nie potrafi znaleźć rozwiązania
+        // Jeśli gotowa, wrzuć do kolejki wykonania. Jeśli nie, zachowaj we front layer
+        if (exec) {
+            workspace.exec_gates.push_back(g_id);
+        } else {
+            workspace.front_layer[write_idx++] = g_id;
         }
     }
+    // Ucięcie resztek z wektora (O(1))
+    workspace.front_layer.resize(write_idx);
+}
 
-    // ==============================================================================
-    // 5. FAZA KOŃCOWA I ZBIERANIE WYNIKÓW
-    // ==============================================================================
-    // Force down pozostałych stanów
+// ==============================================================================
+// 4. BUDOWANIE LOOKAHEAD (PŁASKIE BFS Z EPOKAMI)
+// Poszukuje dalszych zależności bez alokacji nowych wektorów dla każdej głębokości.
+// ==============================================================================
+inline void SabreDEHybridRouter::build_lookahead_layers() {
+    workspace.flat_lookahead_layers.clear();
+    workspace.lookahead_offsets.clear();
+    workspace.lookahead_offsets.push_back(0);
+
+    // O(1) resetowanie odwiedzin
+    workspace.current_bfs_epoch++;
+
+    for (int gid : workspace.front_layer) {
+        workspace.visited_epoch[gid] = workspace.current_bfs_epoch;
+    }
+
+    workspace.exec_gates = workspace.front_layer;
+
+    // Iteracyjna budowa warstw
+    for (size_t depth = 0; depth < max_look_ahead_depth && !workspace.exec_gates.empty(); ++depth) {
+        workspace.ext_layer.clear();
+
+        for (int gid : workspace.exec_gates) {
+            for (int nxt : dag.nodes[gid].next_gates) {
+                // Dodajemy bramkę tylko, jeśli nie była ruszana w obecnej epoce
+                if (workspace.visited_epoch[nxt] != workspace.current_bfs_epoch) {
+                    workspace.visited_epoch[nxt] = workspace.current_bfs_epoch;
+                    workspace.ext_layer.push_back(nxt);
+                    workspace.flat_lookahead_layers.push_back(nxt);
+                }
+            }
+        }
+
+        // Rejestracja offsetu płaskiego widoku
+        if (!workspace.ext_layer.empty()) {
+            workspace.lookahead_offsets.push_back(workspace.flat_lookahead_layers.size());
+        }
+
+        // Swap to najszybszy sposób na podmianę wektorów bez kopiowania
+        std::swap(workspace.exec_gates, workspace.ext_layer);
+    }
+
+    workspace.exec_gates.clear();
+    workspace.ext_layer.clear();
+}
+
+// ==============================================================================
+// 5. FAZA KOŃCOWA Z OBLICZENIEM WYNIKU
+// Wymusza sprowadzenie stanów, sortuje logi i oblicza funkcję celu (fitness).
+// ==============================================================================
+template <bool LOGGING>
+double SabreDEHybridRouter::finalize_evaluation(DERunContext& ctx, const double* genes, int n_gates, int p_cnt,
+                                                int& out_swaps, int& out_moves, double& max_physical_time,
+                                                int& max_logical_depth, std::vector<RoutingRecord>* out_log) {
+    // 1. Force down pozostałych stanów
     for (size_t p = 0; p < p_cnt; ++p) {
         int temp_p = p;
         de_force_down<LOGGING>(temp_p, -1, ctx, genes, n_gates, out_log, false);
     }
 
+    // 2. Sortowanie logowania (tylko w trybie LOGGING)
     if constexpr (LOGGING) {
         if (out_log && !out_log->empty()) {
             std::stable_sort(out_log->begin(), out_log->end(), [](const RoutingRecord& a, const RoutingRecord& b) {
@@ -671,16 +649,64 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
         }
     }
 
-    // Obliczanie max czasu fizycznego i głębokości logicznej.
-    // Zastąpienie std::max przez fast_max_hyb pozwala na uniknięcie odgałęzień w assemblerze.
+    // 3. Zebranie metryk max
     for (double t : ctx.q_time) max_physical_time = fast_max_hyb(max_physical_time, t);
     for (int d : ctx.q_depth) max_logical_depth = fast_max_hyb(max_logical_depth, d);
 
     out_swaps = ctx.out_swaps;
     out_moves = ctx.out_moves;
 
-    // Zwracamy całkowitą ocenę (fitness). Mniejsze wartości są tu preferowane (minimalizacja kosztu).
+    // 4. Obliczenie wartości fitness
     return (ctx.total_routing_cost * 1000.0) + (out_swaps * 5000.0) + (max_physical_time * 1.0) + (max_logical_depth * 0.5);
+}
+
+// ==============================================================================
+// GŁÓWNA FUNKCJA EWALUACJI
+// Używa nowo wydzielonych metod pomocniczych, pozostając ultra czytelną.
+// ==============================================================================
+template <bool LOGGING>
+double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+    int n_gates = dag.nodes.size();
+    int p_cnt = topo.qubits.size();
+
+    out_swaps = 0;
+    out_moves = 0;
+    max_physical_time = 0.0;
+    max_logical_depth = 0;
+
+    DERunContext ctx(workspace);
+
+    // 1. Reset i ustawienie warstwy początkowej
+    reset_evaluation_state(ctx, out_log);
+    init_front_layer(n_gates);
+
+    int gates_routed = 0;
+
+    // 2. Główna pętla symulacyjna
+    while (gates_routed < n_gates) {
+
+        // Oddzielenie bramek możliwych do wykonania (exec_gates) od front_layer
+        extract_executable_gates(ctx);
+
+        // Wykonaj bramki, jeśli cokolwiek znajduje się w exec_gates
+        if (!workspace.exec_gates.empty()) {
+            de_execute_gates<LOGGING>(dag, workspace.exec_gates, workspace.front_layer, workspace.deps, ctx, genes, n_gates, out_log, can_lazy_offboard);
+            gates_routed += workspace.exec_gates.size();
+            std::fill(workspace.decay.begin(), workspace.decay.end(), 1.0);
+            continue;
+        }
+
+        // 3. Budowanie spłaszczonego Lookahead BFS
+        build_lookahead_layers();
+
+        // Krok decyzyjny DE (SWAPy/przesunięcia)
+        if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) {
+            break; // Router zablokował się
+        }
+    }
+
+    // 4. Pobranie i zwrócenie finalnych statystyk fitness
+    return finalize_evaluation<LOGGING>(ctx, genes, n_gates, p_cnt, out_swaps, out_moves, max_physical_time, max_logical_depth, out_log);
 }
 
 // ==============================================================================
@@ -1354,7 +1380,7 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
         // Zbieramy "warstwę rozszerzoną" - czyli patrzymy krok głębiej w DAG (na bezpośrednich
         // następców front_layer), żeby widzieć w którą stronę "wypada" nam ciągnąć kubity na przyszłość.
         // KROK 3: Zbierz bramki w wielowarstwowym "Lookaheadzie" (np. do 3 warstw w głąb)
-        const int LOOKAHEAD_DEPTH = 3;
+        const int LOOKAHEAD_DEPTH = 20;
         std::vector<std::vector<int>> lookahead_layers(LOOKAHEAD_DEPTH);
         std::fill(in_extended.begin(), in_extended.end(), false);
 
