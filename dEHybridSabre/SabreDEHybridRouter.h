@@ -11,7 +11,6 @@
 #include "structures/routing_record.hpp"
 #include <vector>
 #include <string>
-#include <cstdint>
 #include <limits>
 #include <boost/random/xoshiro.hpp>
 
@@ -36,7 +35,12 @@ struct HybridWorkspace {
 
     // Zbuforowane kontenery
     std::vector<int> front_layer, exec_gates, ext_layer;
-    std::vector<bool> in_ext;
+
+    // --- NOWE: Optymalizacja BFS (Licznik Epok) ---
+    // Zastępuje std::vector<bool> in_ext;
+    int current_bfs_epoch = 0;
+    std::vector<int> visited_epoch;
+
     std::vector<double> decay;
 
     std::vector<uint8_t> in_active;
@@ -45,7 +49,11 @@ struct HybridWorkspace {
     // NOWE POLA: optymalizacja O(1) dla krawędzi w routingu i wyciągnięte do góry lokacje
     int route_step_counter = 0;
     std::vector<int> seen_edges;
-    std::vector<std::pair<int, int>> f_locs, e_locs;
+    std::vector<std::pair<int, int>> f_locs;
+    std::vector<int> flat_lookahead_layers;
+    std::vector<int> lookahead_offsets;
+    std::vector<std::pair<int, int>> flat_lookahead_locs;
+    std::vector<int> lookahead_locs_offsets;
 };
 
 // Stan maszyny wyłącznie dla przebiegu SABRE
@@ -100,6 +108,7 @@ private:
     std::vector<Gate> original_circuit;
     int num_qubits;
     std::string name;
+    int max_look_ahead_depth;
 
     mutable std::vector<int> dist_cache;
     HybridSabreDAG dag;
@@ -115,7 +124,7 @@ private:
     std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, std::vector<int>* out_logical_order);
     void sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx);
     void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, std::vector<int>* out_logical_order);
-    bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<int>& extended_layer, SabreRunContext& ctx);
+    bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
 
     // --- Metody Pomocnicze DE ---
     std::vector<int> prepare_sabre_seed();
@@ -128,7 +137,12 @@ private:
     void de_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& exec_gates, std::vector<int>& front_layer, std::vector<int>& deps, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
 
     template <bool LOGGING>
-    bool de_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<int>& ext_layer, std::vector<double>& decay, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log);
+    bool de_route_step(const HybridSabreDAG& current_dag,
+    const std::vector<int>& front_layer,
+    std::vector<double>& decay,
+    DERunContext& ctx,
+    const double* genes, int n_gates,
+    std::vector<RoutingRecord>* out_log);
 
     template <bool LOGGING>
     double evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard);
@@ -144,7 +158,7 @@ private:
     bool validate_logical_circuit(const std::vector<RoutingRecord>& log) const;
 
 public:
-    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name);
+    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth = 1);
 
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
     void optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);

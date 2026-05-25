@@ -23,7 +23,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
     // Generowanie obwodu testowego
-    std::vector<Gate> circuit = generator.generate(10000000, 0.25, 0.15);
+    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
@@ -41,8 +41,8 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // sabre.run_benchmark();
 
     // 4. Wykonanie algorytmu DEHybridSabre
-     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name);
-     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, false, 0.2);
+     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
+     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, true, 0.9);
 }
 
 int main() {

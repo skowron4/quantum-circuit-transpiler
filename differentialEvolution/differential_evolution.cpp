@@ -780,41 +780,43 @@ void DifferentialEvolution::export_moves_to_file(const std::vector<RoutingRecord
 }
 
 bool DifferentialEvolution::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log) const {
-    std::vector<std::vector<std::string>> expected(num_qubits);
-    for (const auto& g : orig_circ) {
-        if (g.type == "1Q") {
-            expected[g.target_q1].push_back("1Q");
-        } else {
-            expected[g.target_q1].push_back("2Q_" + std::to_string(g.target_q2));
-            expected[g.target_q2].push_back("2Q_" + std::to_string(g.target_q1));
-        }
+    // 1. Zbieramy oczekiwaną sekwencję ID z węzłów DE
+    std::vector<std::vector<int>> expected(num_qubits);
+    for (const auto& node : grouped_nodes) {
+        if (node.lq1 != -1) expected[node.lq1].push_back(node.id);
+        if (node.lq2 != -1) expected[node.lq2].push_back(node.id);
     }
 
-    std::vector<std::vector<std::string>> actual(num_qubits);
+    // 2. Zbieramy faktyczną sekwencję ID z logów rutingu
+    std::vector<std::vector<int>> actual(num_qubits);
     for (const auto& op : log) {
-        if (op.op_type == OpType::GATE_1Q) {
-            actual[op.lq1].push_back("1Q");
-        } else if (op.op_type == OpType::GATE_2Q_LOCAL || op.op_type == OpType::GATE_2Q_GLOBAL) {
-            actual[op.lq1].push_back("2Q_" + std::to_string(op.lq2));
-            actual[op.lq2].push_back("2Q_" + std::to_string(op.lq1));
+        if (op.op_type == OpType::GATE_1Q || op.op_type == OpType::GATE_2Q_LOCAL || op.op_type == OpType::GATE_2Q_GLOBAL) {
+
+            if (op.lq1 != -1 && (actual[op.lq1].empty() || actual[op.lq1].back() != op.gate_id)) {
+                actual[op.lq1].push_back(op.gate_id);
+            }
+            if (op.lq2 != -1 && (actual[op.lq2].empty() || actual[op.lq2].back() != op.gate_id)) {
+                actual[op.lq2].push_back(op.gate_id);
+            }
         }
     }
 
+    // 3. Weryfikacja
     bool is_valid = true;
     for (int i = 0; i < num_qubits; ++i) {
         if (expected[i] != actual[i]) {
             is_valid = false;
-            std::cout << "[BŁĄD WALIDACJI] Niezgodność na kubicie logicznym lq" << i << "!\n";
-            std::cout << "  Oczekiwano: ";
-            for (const auto& s : expected[i]) std::cout << s << " ";
-            std::cout << "\n  Otrzymano:  ";
-            for (const auto& s : actual[i]) std::cout << s << " ";
+            std::cout << "[BŁĄD WALIDACJI] Niezgodność kolejności bramek na kubicie logicznym lq" << i << "!\n";
+            std::cout << "  Oczekiwano ID: ";
+            for (int id : expected[i]) std::cout << id << " ";
+            std::cout << "\n  Otrzymano ID:  ";
+            for (int id : actual[i]) std::cout << id << " ";
             std::cout << "\n";
         }
     }
 
     if (is_valid) {
-        std::cout << "[OK] Walidacja pomyślna. Obwód wyjściowy zachowuje semantykę logiczną obwodu wejściowego.\n";
+        std::cout << "[OK] Walidacja pomyślna. Obwód wyjściowy zachowuje semantykę logiczną obwodu wejściowego (ID bramek)!\n";
     }
     return is_valid;
 }
