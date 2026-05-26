@@ -53,6 +53,8 @@ set(SOURCES
         sabre/SabreRouter.h
         dEHybridSabre/SabreDEHybridRouter.cpp
         dEHybridSabre/SabreDEHybridRouter.h
+        newDESABRE/newSabreDEHybridRouter.cpp
+        newDESABRE/newSabreDEHybridRouter.h
 )
 
 add_executable(magisterka ${SOURCES})

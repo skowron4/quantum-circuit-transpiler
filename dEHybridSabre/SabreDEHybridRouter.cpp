@@ -665,30 +665,59 @@ double SabreDEHybridRouter::finalize_evaluation(DERunContext& ctx, const double*
 // Używa nowo wydzielonych metod pomocniczych, pozostając ultra czytelną.
 // ==============================================================================
 template <bool LOGGING>
-double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard) {
+double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard, DEStateSnapshot* load_snapshot, DEStateSnapshot* save_snapshot) {
     int n_gates = dag.nodes.size();
     int p_cnt = topo.qubits.size();
-
-    out_swaps = 0;
-    out_moves = 0;
-    max_physical_time = 0.0;
-    max_logical_depth = 0;
-
     DERunContext ctx(workspace);
-
-    // 1. Reset i ustawienie warstwy początkowej
-    reset_evaluation_state(ctx, out_log);
-    init_front_layer(n_gates);
 
     int gates_routed = 0;
 
-    // 2. Główna pętla symulacyjna
-    while (gates_routed < n_gates) {
+    // --- ŁADOWANIE ZAPISANEGO STANU (Omijanie wykonanej pracy) ---
+    if (load_snapshot && load_snapshot->is_valid) {
+        // Ultraszybkie przepisywanie pamięci przez std::copy
+        std::copy(load_snapshot->l2p.begin(), load_snapshot->l2p.end(), ctx.l2p.begin());
+        std::copy(load_snapshot->p2l.begin(), load_snapshot->p2l.end(), ctx.p2l.begin());
+        std::copy(load_snapshot->q_on_res.begin(), load_snapshot->q_on_res.end(), ctx.q_on_res.begin());
+        std::copy(load_snapshot->res_occ.begin(), load_snapshot->res_occ.end(), ctx.res_occ.begin());
+        std::copy(load_snapshot->q_depth.begin(), load_snapshot->q_depth.end(), ctx.q_depth.begin());
+        std::copy(load_snapshot->q_time.begin(), load_snapshot->q_time.end(), ctx.q_time.begin());
+        std::copy(load_snapshot->r_time.begin(), load_snapshot->r_time.end(), ctx.r_time.begin());
 
-        // Oddzielenie bramek możliwych do wykonania (exec_gates) od front_layer
+        ctx.out_swaps = load_snapshot->out_swaps;
+        ctx.out_moves = load_snapshot->out_moves;
+        ctx.total_routing_cost = load_snapshot->total_routing_cost;
+        gates_routed = load_snapshot->target_gates_routed;
+
+        workspace.deps = load_snapshot->deps;
+        workspace.front_layer = load_snapshot->front_layer;
+        workspace.decay = load_snapshot->decay;
+
+        // Zabezpieczamy odpowiednio offsety BFS
+        workspace.current_bfs_epoch++;
+        if (out_log) out_log->clear(); // W trybie optymalizacji omijamy logi do snapshota
+    } else {
+        // Standardowy start od 0
+        reset_evaluation_state(ctx, out_log);
+        init_front_layer(n_gates);
+    }
+
+    // --- GŁÓWNA PĘTLA SYMULACJI ---
+    while (gates_routed < n_gates) {
+        // [NOWE] Czy osiągnęliśmy moment, w którym musimy zapisać zrzut?
+        if (save_snapshot && !save_snapshot->is_valid && gates_routed >= save_snapshot->target_gates_routed) {
+            save_snapshot->l2p = ctx.l2p; save_snapshot->p2l = ctx.p2l;
+            save_snapshot->q_on_res = ctx.q_on_res; save_snapshot->res_occ = ctx.res_occ;
+            save_snapshot->q_depth = ctx.q_depth; save_snapshot->q_time = ctx.q_time;
+            save_snapshot->r_time = ctx.r_time;
+            save_snapshot->out_swaps = ctx.out_swaps; save_snapshot->out_moves = ctx.out_moves;
+            save_snapshot->total_routing_cost = ctx.total_routing_cost;
+            save_snapshot->deps = workspace.deps; save_snapshot->front_layer = workspace.front_layer;
+            save_snapshot->decay = workspace.decay;
+            save_snapshot->is_valid = true;
+        }
+
         extract_executable_gates(ctx);
 
-        // Wykonaj bramki, jeśli cokolwiek znajduje się w exec_gates
         if (!workspace.exec_gates.empty()) {
             de_execute_gates<LOGGING>(dag, workspace.exec_gates, workspace.front_layer, workspace.deps, ctx, genes, n_gates, out_log, can_lazy_offboard);
             gates_routed += workspace.exec_gates.size();
@@ -696,16 +725,12 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
             continue;
         }
 
-        // 3. Budowanie spłaszczonego Lookahead BFS
+        // Możesz tu podmienić na naivą logikę w zależności od parametru (flagi klasowej)
         build_lookahead_layers();
-
-        // Krok decyzyjny DE (SWAPy/przesunięcia)
-        if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) {
-            break; // Router zablokował się
-        }
+        // if (!de_naive_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) break;
+        if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) break;
     }
 
-    // 4. Pobranie i zwrócenie finalnych statystyk fitness
     return finalize_evaluation<LOGGING>(ctx, genes, n_gates, p_cnt, out_swaps, out_moves, max_physical_time, max_logical_depth, out_log);
 }
 
@@ -862,44 +887,59 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
 
     // Krok przesuwania okna zależy od accept_ratio (np. okno 100, ratio 0.5 -> przesuwamy o 50).
     int step = std::max(1, static_cast<int>(window_size * accept_ratio));
-    int d_s, d_m, d_d; double d_t; // Zmienne pomocnicze dla statystyk ewaluacji
+    int d_s, d_m, d_d; double d_t;
+
+    // INICJALIZACJA best_idx PRZED PĘTLĄ! (Rozwiązuje Cannot resolve symbol)
+    // Na starcie zakładamy, że najlepszy jest osobnik 0 (ziarno SABRE).
+    int best_idx = 0;
+
+    DEStateSnapshot current_snapshot;
+    current_snapshot.is_valid = false;
 
     // 4. GŁÓWNA PĘTLA OKIENKOWA
     for (int w_start = 0; w_start < n_gates; w_start += step) {
-        // Zabezpieczenie, aby okno nie wyszło poza liczbę bramek
         int w_end = std::min(w_start + window_size, n_gates);
         std::cout << ">>> Przetwarzanie okna: operacje [" << w_start << " - " << w_end - 1 << "] / " << n_gates << "\n";
 
-        // 5. Wywołanie Ewolucji Różnicowej TYLKO dla aktualnego okna
-        run_evolution_loop_windowed(pop, fitness, pop_size, generations_per_window, n_genes, n_gates, f, cr, rng, w_start, w_end);
+        // TWORZENIE SNAPSHOTA
+        // Robimy to tylko wtedy, gdy przesunęliśmy już okno (w_start > 0).
+        // Używamy genów NAJLEPSZEGO osobnika z POPRZEDNIEJ iteracji (best_idx).
+        if (w_start > 0) {
+            current_snapshot.is_valid = false;
+            current_snapshot.target_gates_routed = w_start; // chcemy zapisać stan po wykonaniu w_start bramek
 
-        // Znalezienie najlepszego osobnika w populacji po ewolucji tego okna
+            // Ciche wywołanie tylko w celu wygenerowania (zapisania) snapshota.
+            // Argumenty: load_snapshot = nullptr, save_snapshot = &current_snapshot
+            evaluate_fitness_impl<false>(pop.data() + best_idx * n_genes, d_s, d_m, d_t, d_d, nullptr, can_lazy, nullptr, &current_snapshot);
+        }
+
+        // WYWOŁANIE EWOLUCJI
+        // Przekazujemy wszystkie niezbędne parametry oraz nasz snapshot.
+        run_evolution_loop_windowed(pop, fitness, pop_size, generations_per_window, n_genes, n_gates, f, cr, rng, w_start, w_end, &current_snapshot);
+
+        // AKTUALIZACJA NAJLEPSZEGO OSOBNIKA (do wykorzystania w kolejnym oknie)
         auto best_iter = std::min_element(fitness.begin(), fitness.end());
-        int best_idx = std::distance(fitness.begin(), best_iter);
+        best_idx = std::distance(fitness.begin(), best_iter); // Przypisanie nowej wartości do zmiennej
 
-        // Określenie, do którego miejsca "akceptujemy" zoptymalizowane rozwiązanie
+        // PROPAGACJA SUKCESU
         int accept_end = std::min(w_start + step, n_gates);
-
-        // 6. ROZPROPAGOWANIE SUKCESU
-        // Kopiujemy najlepsze geny z zaakceptowanej części okna do całej reszty populacji.
-        // Dzięki temu w następnym kroku (dla kolejnego okna) cała populacja zaczyna
-        // z wypracowaną do tej pory optymalną "przeszłością".
         for (int i = 0; i < pop_size; ++i) {
-            if (i == best_idx) continue; // Najlepszy osobnik już to ma
+            if (i == best_idx) continue;
             for (int blk = 0; blk < blocks; ++blk) {
                 for (int g = w_start; g < accept_end; ++g) {
                     pop[i * n_genes + blk * n_gates + g] = pop[best_idx * n_genes + blk * n_gates + g];
                 }
             }
-            // Aktualizacja fitness po nadpisaniu genów z przeszłości
-            fitness[i] = evaluate_fitness(pop.data() + i * n_genes, d_s, d_m, d_t, d_d, nullptr, can_lazy);
+
+            // Re-ewaluacja po nadpisaniu genów z wykorzystaniem Snapshota
+            fitness[i] = evaluate_fitness_impl<false>(pop.data() + i * n_genes, d_s, d_m, d_t, d_d, nullptr, can_lazy, &current_snapshot, nullptr);
         }
     }
 
     // 7. Podsumowanie, walidacja i eksport wyników
     auto end_time = std::chrono::high_resolution_clock::now();
     auto best_it = std::min_element(fitness.begin(), fitness.end());
-    int best_idx = std::distance(fitness.begin(), best_it);
+    best_idx = std::distance(fitness.begin(), best_it);
 
     std::vector<RoutingRecord> final_log;
     int final_swaps = 0, final_moves = 0, final_depth = 0; double final_makespan = 0.0;
@@ -917,29 +957,25 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
 // ==============================================================================
 // Wykonywanie pokoleń, ale z ograniczeniem zmian tylko do bieżącego okna. Wybiera kandydatów do mutacji i ocenia, czy nowe rozwiązanie jest lepsze od starego.
 // ==============================================================================
-void SabreDEHybridRouter::run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end) {
+void SabreDEHybridRouter::run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end, DEStateSnapshot* snapshot) {
     boost::random::uniform_int_distribution<int> dist_int(0, pop_size - 1);
     std::vector<double> trial(n_genes);
     int d_s, d_m, d_d; double d_t;
-    bool can_lazy = (n_genes / n_gates == 4); // Sprytne wyciągnięcie flagi z proporcji genów
+    bool can_lazy = (n_genes / n_gates == 4);
 
     for (int gen = 0; gen < generations; ++gen) {
         for (int i = 0; i < pop_size; ++i) {
-            // 1. Wybór 3 RÓŻNYCH losowych osobników (a, b, c) z populacji,
-            // żaden z nich nie może być też obecnie ewaluowanym osobnikiem (i).
             int a, b, c;
             do { a = dist_int(rng); } while (a == i);
             do { b = dist_int(rng); } while (b == i || b == a);
             do { c = dist_int(rng); } while (c == i || c == a || c == b);
 
-            // 2. Wygenerowanie nowego osobnika (wektora próbnego) - zmiany tylko w oknie!
             generate_trial_vector_windowed(pop, trial, i, a, b, c, n_genes, n_gates, f, cr, rng, w_start, w_end);
 
-            // 3. Ocena funkcji przystosowania (fitness) dla nowego wektora próbnego
-            double trial_fit = evaluate_fitness(trial.data(), d_s, d_m, d_t, d_d, nullptr, can_lazy);
+            // UWAGA: Przekazujemy 'snapshot' jako wskaźnik do ładowania (load_snapshot)
+            // Zwróć uwagę, że argument save_snapshot dajemy na nullptr.
+            double trial_fit = evaluate_fitness_impl<false>(trial.data(), d_s, d_m, d_t, d_d, nullptr, can_lazy, snapshot, nullptr);
 
-            // 4. Selekcja: Jeśli nowy osobnik jest lepszy (ma mniejszy koszt),
-            // zastępuje starego osobnika w bieżącej generacji populacji.
             if (trial_fit < fitness[i]) {
                 std::copy(trial.begin(), trial.end(), pop.begin() + i * n_genes);
                 fitness[i] = trial_fit;
@@ -1453,6 +1489,110 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
     run_sabre_pass(dag, pre_final, true, &logical_exec_order);
 
     return logical_exec_order;
+}
+
+template <bool LOGGING>
+bool SabreDEHybridRouter::de_naive_route_step(
+    const HybridSabreDAG& current_dag,
+    const std::vector<int>& front_layer,
+    std::vector<double>& decay,
+    DERunContext& ctx,
+    const double* genes, int n_gates,
+    std::vector<RoutingRecord>* out_log)
+{
+    // 1. O(1) zbieranie aktywnych kubitów
+    std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
+    ctx.ws.active_phys.clear();
+    ctx.ws.f_locs.clear();
+
+    for (int gid : front_layer) {
+        const auto& node = current_dag.nodes[gid];
+        if (node.lq1 != -1 && ctx.l2p[node.lq1] != -1 && !ctx.ws.in_active[ctx.l2p[node.lq1]]) {
+            ctx.ws.in_active[ctx.l2p[node.lq1]] = 1;
+            ctx.ws.active_phys.push_back(ctx.l2p[node.lq1]);
+        }
+        if (node.lq2 != -1 && ctx.l2p[node.lq2] != -1 && !ctx.ws.in_active[ctx.l2p[node.lq2]]) {
+            ctx.ws.in_active[ctx.l2p[node.lq2]] = 1;
+            ctx.ws.active_phys.push_back(ctx.l2p[node.lq2]);
+        }
+        // Cache dla lokalizacji docelowych we front_layer
+        if (node.lq2 != -1) ctx.ws.f_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+    }
+
+    ctx.ws.route_step_counter++;
+    int step_id = ctx.ws.route_step_counter;
+    int p_cnt = topo.qubits.size();
+
+    double best_score = std::numeric_limits<double>::max();
+    int best_p1 = -1, best_p2 = -1, best_r = -1;
+
+    // 2. Szukanie krawędzi (bez patrzenia w głąb!)
+    for (int p : ctx.ws.active_phys) {
+        for (int r : topo.qubits[p].connected_resonators) {
+            for (int nb : topo.resonators[r].connected_qubits) {
+                if (p == nb) continue;
+                int u = std::min(p, nb), v = std::max(p, nb);
+
+                int edge_idx = u * p_cnt + v;
+                if (ctx.ws.seen_edges[edge_idx] == step_id) continue;
+                ctx.ws.seen_edges[edge_idx] = step_id;
+
+                double sF = 0;
+                // Skupiamy się WYŁĄCZNIE na front_layer
+                for (const auto& loc : ctx.ws.f_locs) {
+                    int l1 = loc.first, l2 = loc.second;
+                    if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
+                    if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
+                    sF += get_distance(l1, l2);
+                }
+
+                double f_norm = ctx.ws.f_locs.empty() ? 0 : (sF / ctx.ws.f_locs.size());
+
+                // Mutacja wprowadzająca czynnik losowy z algorytmu DE
+                double mutation = 0.95 + (genes[u % n_gates] * 0.1);
+
+                // Brak ext_score! Wynik opiera się tylko na f_norm i karach (decay).
+                double score = f_norm * fast_max_hyb(decay[u], decay[v]) * mutation;
+
+                if (score < best_score) {
+                    best_score = score;
+                    best_p1 = u; best_p2 = v; best_r = r;
+                }
+            }
+        }
+    }
+
+    // 3. Wykonanie ruchu na najlepszym kandydacie (kod identyczny jak w pełnym kroku)
+    if (best_p1 != -1) {
+        int p1 = best_p1, p2 = best_p2, r_step = best_r;
+
+        de_force_down<LOGGING>(p1, -1, ctx, genes, n_gates, out_log, false);
+        de_force_down<LOGGING>(p2, -1, ctx, genes, n_gates, out_log, false);
+        if (ctx.res_occ[r_step] != -1) de_force_down<LOGGING>(ctx.res_occ[r_step], -1, ctx, genes, n_gates, out_log, false);
+
+        double step_start = fast_max_hyb(ctx.q_time[p1], fast_max_hyb(ctx.r_time[r_step], ctx.q_time[p2]));
+        bool is_move = (ctx.p2l[p2] == -1) || (ctx.p2l[p1] == -1);
+        double cost = is_move ? 2.0 * MOVE_COST : SWAP_COST;
+
+        if constexpr (LOGGING) {
+            if (!is_move) out_log->push_back({OpType::SWAP, -1, ctx.p2l[p1], ctx.p2l[p2], p1, p2, r_step, step_start});
+        }
+
+        if (is_move) ctx.out_moves += 2; else ctx.out_swaps++;
+        ctx.total_routing_cost += cost;
+
+        std::swap(ctx.p2l[p1], ctx.p2l[p2]);
+        if (ctx.p2l[p1] != -1) ctx.l2p[ctx.p2l[p1]] = p1;
+        if (ctx.p2l[p2] != -1) ctx.l2p[ctx.p2l[p2]] = p2;
+
+        int curr_lay = fast_max_hyb(ctx.q_depth[p1], ctx.q_depth[p2]) + (is_move ? 2 : 1);
+        ctx.q_depth[p1] = ctx.q_depth[p2] = curr_lay;
+        ctx.q_time[p1] = ctx.q_time[p2] = ctx.r_time[r_step] = step_start + cost;
+
+        decay[p1] += 0.2; decay[p2] += 0.2;
+        return true;
+    }
+    return false;
 }
 
 bool SabreDEHybridRouter::validate_logical_circuit(const std::vector<RoutingRecord>& log) const {

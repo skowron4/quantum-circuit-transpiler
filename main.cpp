@@ -1,9 +1,9 @@
 #include <iostream>
-
 #include "generator/CircuitGenerator.h"
 #include "geneticAlgorithm/toSort/swap_evaluator.hpp"
 #include "architecture/IQMTriangleConstellation.h"
 #include "dEHybridSabre/SabreDEHybridRouter.h"
+#include "newDESABRE/newSabreDEHybridRouter.h"
 #include "differentialEvolution/differential_evolution.h"
 #include "sabre/SabreRouter.h"
 #ifdef _WIN32
@@ -41,8 +41,13 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // sabre.run_benchmark();
 
     // 4. Wykonanie algorytmu DEHybridSabre
-     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
-     SabreDERouter.optimize_windowed(30, 200, 500, 0.7, true, 0.9);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 2);
+    SabreDERouter.optimize_windowed(30, 200, 500, 0.7, true, 0.9);
+
+    // 5. Wykonanie algorytmu newDEHybridSabre
+    // newSabreDEHybridRouter newSabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
+    // newSabreDERouter.optimize_windowed(30, 100, 500, 0.7, true, false, 0.8, 0.9);
+
 }
 
 int main() {
@@ -53,12 +58,12 @@ int main() {
     SetConsoleCP(CP_UTF8);
 #endif
     // Topologia siatki 2x2
-    // IQMConstellation gridQpu(3, 3);
-    // run_test_for_topology(gridQpu, "Siatka 3x3");
+    IQMConstellation gridQpu(3, 3);
+    run_test_for_topology(gridQpu, "Siatka 3x3");
 
     // Topologia trójkątna
-    IQMTriangleConstellation triangleQpu;
-    run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
+    // IQMTriangleConstellation triangleQpu;
+    // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
 
     return 0;
 }

@@ -14,6 +14,21 @@
 #include <limits>
 #include <boost/random/xoshiro.hpp>
 
+struct DEStateSnapshot {
+    bool is_valid = false;
+    int target_gates_routed = 0;
+
+    // Dane z ctx
+    std::vector<int> l2p, p2l, q_on_res, res_occ, q_depth;
+    std::vector<double> q_time, r_time;
+    int out_swaps = 0, out_moves = 0;
+    double total_routing_cost = 0.0;
+
+    // Dane z workspace
+    std::vector<int> deps, front_layer;
+    std::vector<double> decay;
+};
+
 // --- Struktury wewnątrz hybrydy ---
 struct HybridGateNode {
     int id;
@@ -134,6 +149,15 @@ private:
 
     // --- Metody Pomocnicze DE ---
     template <bool LOGGING>
+    bool de_naive_route_step(
+        const HybridSabreDAG& current_dag,
+        const std::vector<int>& front_layer,
+        std::vector<double>& decay,
+        DERunContext& ctx,
+        const double* genes, int n_gates,
+        std::vector<RoutingRecord>* out_log);
+
+    template <bool LOGGING>
     double finalize_evaluation(DERunContext& ctx, const double* genes, int n_gates, int p_cnt,
                                int& out_swaps, int& out_moves, double& max_physical_time,
                                int& max_logical_depth, std::vector<RoutingRecord>* out_log);
@@ -156,10 +180,10 @@ private:
     std::vector<RoutingRecord>* out_log);
 
     template <bool LOGGING>
-    double evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard);
+    double evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard, DEStateSnapshot* load_snapshot = nullptr, DEStateSnapshot* save_snapshot = nullptr);
     double evaluate_fitness(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard);
 
-    void run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end);
+    void run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end, DEStateSnapshot* snapshot);
     void generate_trial_vector_windowed(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end);
 
     // --- Narzędzia ---
