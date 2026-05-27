@@ -10,8 +10,8 @@
 
 inline double fast_max_hyb(double a, double b) { return (a > b) ? a : b; }
 
-SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth)
-    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)), max_look_ahead_depth(max_look_ahead_depth)  {
+SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow, int max_look_ahead_depth)
+    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)), slow(slow), max_look_ahead_depth(max_look_ahead_depth)  {
     int p_cnt = topo.qubits.size();
     int r_cnt = topo.resonators.size();
 
@@ -20,6 +20,25 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
 
     dag = build_dag(original_circuit);
     int g_cnt = dag.nodes.size(); // <--- Tutaj definiujesz liczbę bramek jako g_cnt
+
+    // [OPTYMALIZACJA 5] Prekalkulacja fizycznych połączeń rezonatorów
+    precomputed_swaps_offsets.clear();
+    precomputed_swaps_offsets.reserve(p_cnt + 1);
+    flat_precomputed_swaps.reserve(p_cnt * 6); // Szacunkowy zapas, zależy od topologii
+
+    precomputed_swaps_offsets.push_back(0); // Offset początkowy dla kubitu 0
+    for (int p = 0; p < p_cnt; ++p) {
+        for (int r : topo.qubits[p].connected_resonators) {
+            for (int neighbor_p : topo.resonators[r].connected_qubits) {
+                if (p != neighbor_p) {
+                    flat_precomputed_swaps.push_back({neighbor_p, r});
+                }
+            }
+        }
+        // Zapisujemy, gdzie kończą się sąsiedzi dla kubitu 'p'
+        // (będzie to jednocześnie start dla 'p+1')
+        precomputed_swaps_offsets.push_back(flat_precomputed_swaps.size());
+    }
 
     std::vector<Gate> reversed_circuit = original_circuit;
     std::reverse(reversed_circuit.begin(), reversed_circuit.end());
@@ -48,6 +67,10 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
     workspace.shared_res.reserve(r_cnt);
     workspace.in_active.resize(p_cnt, 0);
     workspace.active_phys.reserve(p_cnt);
+    workspace.active_phys.reserve(p_cnt);
+
+    workspace.interaction_counts.assign(p_cnt, 0);
+    workspace.flat_interactions.resize(p_cnt * HybridWorkspace::MAX_INTER_PER_Q);
 
     // [OPTYMALIZACJA 1] Pre-alokacja dla seen_edges
     workspace.route_step_counter = 0;
@@ -65,33 +88,48 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
     // Daje to 100% pewność, że std::vector nigdy nie wykona malloc/free podczas oceny osobników DE.
     workspace.flat_lookahead_layers.reserve(g_cnt);
     workspace.flat_lookahead_locs.reserve(g_cnt);
+
+    // Dodaj to na końcu konstruktora SabreDEHybridRouter:
+    std::cout << "[Inicjalizacja] Pre-kalkulacja pełnej macierzy odległości...\n";
+    for (int i = 0; i < p_cnt; ++i) {
+        for (int j = i; j < p_cnt; ++j) {
+            if (i == j) {
+                dist_cache[i * p_cnt + j] = 0;
+            } else {
+                int dist = topo.get_routing_path(i, j).resonators.size();
+                dist_cache[i * p_cnt + j] = dist;
+                dist_cache[j * p_cnt + i] = dist; // Symetria
+            }
+        }
+    }
 }
 
 // ==============================================================================
 // OBLICZANIE ODLEGŁOŚCI Z CACHE
 // ==============================================================================
 int SabreDEHybridRouter::get_distance(int p1, int p2) const {
-    if (p1 == p2) return 0; // Odległość do samego siebie to zawsze 0
-    int p_cnt = topo.qubits.size();
+    // if (p1 == p2) return 0; // Odległość do samego siebie to zawsze 0
+    // int p_cnt = topo.qubits.size();
+    //
+    // // Używamy spłaszczonej tablicy 1D jako macierzy 2D.
+    // // Wzór na indeks to: wiersz * szerokość + kolumna
+    // int idx = p1 * p_cnt + p2;
+    //
+    // // Jeśli wartość nie jest -1, to znaczy, że już to kiedyś liczyliśmy.
+    // // O(1) zwrot z bufora - oszczędza mnóstwo czasu!
+    // if (dist_cache[idx] != -1) return dist_cache[idx];
+    //
+    // // Jeśli liczymy to pierwszy raz: odpytujemy topologię o ścieżkę
+    // // i liczymy ile po drodze jest rezonatorów (to nasza odległość).
+    // int dist = topo.get_routing_path(p1, p2).resonators.size();
+    //
+    // // Zapisujemy wynik do cache SYMETRYCZNIE.
+    // // Odległość z p1 do p2 jest taka sama jak z p2 do p1.
+    // dist_cache[idx] = dist;
+    // dist_cache[p2 * p_cnt + p1] = dist;
 
-    // Używamy spłaszczonej tablicy 1D jako macierzy 2D.
-    // Wzór na indeks to: wiersz * szerokość + kolumna
-    int idx = p1 * p_cnt + p2;
-
-    // Jeśli wartość nie jest -1, to znaczy, że już to kiedyś liczyliśmy.
-    // O(1) zwrot z bufora - oszczędza mnóstwo czasu!
-    if (dist_cache[idx] != -1) return dist_cache[idx];
-
-    // Jeśli liczymy to pierwszy raz: odpytujemy topologię o ścieżkę
-    // i liczymy ile po drodze jest rezonatorów (to nasza odległość).
-    int dist = topo.get_routing_path(p1, p2).resonators.size();
-
-    // Zapisujemy wynik do cache SYMETRYCZNIE.
-    // Odległość z p1 do p2 jest taka sama jak z p2 do p1.
-    dist_cache[idx] = dist;
-    dist_cache[p2 * p_cnt + p1] = dist;
-
-    return dist;
+    // return dist;
+    return dist_cache[p1 * topo.qubits.size() + p2];
 }
 
 // ==============================================================================
@@ -353,6 +391,195 @@ bool SabreDEHybridRouter::de_route_step(
     const double* genes, int n_gates,
     std::vector<RoutingRecord>* out_log)
 {
+    int p_cnt = topo.qubits.size();
+
+    // 1. Zbieranie aktywnych kubitów i szybki reset interakcji (O(p_cnt))
+    std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
+    std::fill(ctx.ws.interaction_counts.begin(), ctx.ws.interaction_counts.end(), 0); // O(1) reset!
+    ctx.ws.active_phys.clear();
+
+    auto add_interaction = [&](int q, int target, double weight) {
+        int& cnt = ctx.ws.interaction_counts[q];
+        if (cnt < HybridWorkspace::MAX_INTER_PER_Q) {
+            ctx.ws.flat_interactions[q * HybridWorkspace::MAX_INTER_PER_Q + cnt] = {target, weight};
+            cnt++;
+        }
+    };
+
+    for (int gid : front_layer) {
+        const auto& node = current_dag.nodes[gid];
+        if (node.lq1 != -1 && ctx.l2p[node.lq1] != -1 && !ctx.ws.in_active[ctx.l2p[node.lq1]]) {
+            ctx.ws.in_active[ctx.l2p[node.lq1]] = 1;
+            ctx.ws.active_phys.push_back(ctx.l2p[node.lq1]);
+        }
+        if (node.lq2 != -1 && ctx.l2p[node.lq2] != -1 && !ctx.ws.in_active[ctx.l2p[node.lq2]]) {
+            ctx.ws.in_active[ctx.l2p[node.lq2]] = 1;
+            ctx.ws.active_phys.push_back(ctx.l2p[node.lq2]);
+        }
+    }
+
+    // 2. Budowa mapy interakcji (LightSABRE) i Bazy Kosztu (Base Score)
+    ctx.ws.f_locs.clear();
+    double base_total_score = 0.0;
+
+    // --- A. Obsługa Front Layer ---
+    for (int gid : front_layer) {
+        const auto& node = current_dag.nodes[gid];
+        if (node.lq2 != -1) ctx.ws.f_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+    }
+
+    double f_weight = ctx.ws.f_locs.empty() ? 0.0 : (1.0 / ctx.ws.f_locs.size());
+    // We front_layer:
+    for (const auto& loc : ctx.ws.f_locs) {
+        int u = loc.first, v = loc.second;
+        add_interaction(u, v, f_weight);
+        add_interaction(v, u, f_weight);
+        base_total_score += f_weight * get_distance(u, v);
+    }
+
+    // --- B. Obsługa Lookahead ---
+    ctx.ws.flat_lookahead_locs.clear();
+    ctx.ws.lookahead_locs_offsets.clear();
+    ctx.ws.lookahead_locs_offsets.push_back(0);
+
+    for (size_t i = 0; i < ctx.ws.lookahead_offsets.size() - 1; ++i) {
+        int start_idx = ctx.ws.lookahead_offsets[i];
+        int end_idx = ctx.ws.lookahead_offsets[i+1];
+        for (int j = start_idx; j < end_idx; ++j) {
+            int gid = ctx.ws.flat_lookahead_layers[j];
+            const auto& node = current_dag.nodes[gid];
+            if (node.lq2 != -1) {
+                ctx.ws.flat_lookahead_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+            }
+        }
+        ctx.ws.lookahead_locs_offsets.push_back(ctx.ws.flat_lookahead_locs.size());
+    }
+
+    double layer_weight = EXTENDED_LAYER_WEIGHT;
+    for (size_t i = 0; i < ctx.ws.lookahead_locs_offsets.size() - 1; ++i) {
+        int start_idx = ctx.ws.lookahead_locs_offsets[i];
+        int end_idx = ctx.ws.lookahead_locs_offsets[i+1];
+        int layer_size = end_idx - start_idx;
+
+        if (layer_size == 0) {
+            layer_weight *= 0.5;
+            continue;
+        }
+
+        double w = layer_weight / layer_size;
+        for (int j = start_idx; j < end_idx; ++j) {
+            int u = ctx.ws.flat_lookahead_locs[j].first;
+            int v = ctx.ws.flat_lookahead_locs[j].second;
+            add_interaction(u, v, w);
+            add_interaction(v, u, w);
+            base_total_score += w * get_distance(u, v);
+        }
+        layer_weight *= 0.5;
+    }
+
+    // 3. Poszukiwanie najlepszej krawędzi - SUPER ZOPTYMALIZOWANA PĘTLA
+    ctx.ws.route_step_counter++;
+    int step_id = ctx.ws.route_step_counter;
+
+    double best_score = std::numeric_limits<double>::max();
+    int best_p1 = -1, best_p2 = -1, best_r = -1;
+
+    for (int p : ctx.ws.active_phys) {
+        int start_idx = precomputed_swaps_offsets[p];
+        int end_idx = precomputed_swaps_offsets[p + 1];
+
+        for (int i = start_idx; i < end_idx; ++i) {
+            const auto& edge = flat_precomputed_swaps[i];
+            int nb = edge.neighbor;
+            int r = edge.resonator;
+
+            int u = std::min(p, nb), v = std::max(p, nb);
+            int edge_idx = u * p_cnt + v;
+            if (ctx.ws.seen_edges[edge_idx] == step_id) continue;
+            ctx.ws.seen_edges[edge_idx] = step_id;
+
+            // --- MAGIA O(K) --- Zamiast przeszukiwać cały graf, patrzymy tylko tam,
+            // gdzie kubity `u` i `v` rzeczywiście wchodzą z kimś w interakcję.
+            double delta = 0.0;
+
+            int c_u = ctx.ws.interaction_counts[u];
+            int off_u = u * HybridWorkspace::MAX_INTER_PER_Q;
+            for (int k = 0; k < c_u; ++k) {
+                const auto& inter = ctx.ws.flat_interactions[off_u + k];
+                if (inter.target != v) {
+                    delta += inter.weight * (get_distance(v, inter.target) - get_distance(u, inter.target));
+                }
+            }
+
+            int c_v = ctx.ws.interaction_counts[v];
+            int off_v = v * HybridWorkspace::MAX_INTER_PER_Q;
+            for (int k = 0; k < c_v; ++k) {
+                const auto& inter = ctx.ws.flat_interactions[off_v + k];
+                if (inter.target != u) {
+                    delta += inter.weight * (get_distance(u, inter.target) - get_distance(v, inter.target));
+                }
+            }
+
+            // Ostateczny koszt to Baza z dodaną Deltą
+            double score = (base_total_score + delta) * fast_max_hyb(decay[u], decay[v]);
+
+            // Wpływ genetyczny mutacji DE
+            double mutation = 0.95 + (genes[u % n_gates] * 0.1);
+            score *= mutation;
+
+            if (score < best_score) {
+                best_score = score;
+                best_p1 = u; best_p2 = v; best_r = r;
+            }
+        }
+    }
+
+    // 4. Egzekucja wybranego ruchu (pozostaje w 100% bez zmian)
+    if (best_p1 != -1) {
+        int p1 = best_p1, p2 = best_p2, r_step = best_r;
+
+        de_force_down<LOGGING>(p1, -1, ctx, genes, n_gates, out_log, false);
+        de_force_down<LOGGING>(p2, -1, ctx, genes, n_gates, out_log, false);
+        if (ctx.res_occ[r_step] != -1) de_force_down<LOGGING>(ctx.res_occ[r_step], -1, ctx, genes, n_gates, out_log, false);
+
+        double step_start = fast_max_hyb(ctx.q_time[p1], fast_max_hyb(ctx.r_time[r_step], ctx.q_time[p2]));
+        bool is_move = (ctx.p2l[p2] == -1) || (ctx.p2l[p1] == -1);
+        double cost = is_move ? 2.0 * MOVE_COST : SWAP_COST;
+
+        if constexpr (LOGGING) {
+            if (!is_move) out_log->push_back({OpType::SWAP, -1, ctx.p2l[p1], ctx.p2l[p2], p1, p2, r_step, step_start});
+        }
+
+        if (is_move) ctx.out_moves += 2; else ctx.out_swaps++;
+        ctx.total_routing_cost += cost;
+
+        std::swap(ctx.p2l[p1], ctx.p2l[p2]);
+        if (ctx.p2l[p1] != -1) ctx.l2p[ctx.p2l[p1]] = p1;
+        if (ctx.p2l[p2] != -1) ctx.l2p[ctx.p2l[p2]] = p2;
+
+        int curr_lay = fast_max_hyb(ctx.q_depth[p1], ctx.q_depth[p2]) + (is_move ? 2 : 1);
+        ctx.q_depth[p1] = ctx.q_depth[p2] = curr_lay;
+        ctx.q_time[p1] = ctx.q_time[p2] = ctx.r_time[r_step] = step_start + cost;
+
+        decay[p1] += 0.2; decay[p2] += 0.2;
+        return true;
+    }
+    return false;
+}
+
+// ==============================================================================
+// dokladny step_route
+// Czyści i przygotowuje kontekst przed symulacją.
+// ==============================================================================
+template <bool LOGGING>
+bool SabreDEHybridRouter::de_route_step_better(
+    const HybridSabreDAG& current_dag,
+    const std::vector<int>& front_layer,
+    std::vector<double>& decay,
+    DERunContext& ctx,
+    const double* genes, int n_gates,
+    std::vector<RoutingRecord>* out_log)
+{
     // 1. Zbieranie aktywnych kubitów
     std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
     ctx.ws.active_phys.clear();
@@ -505,6 +732,7 @@ bool SabreDEHybridRouter::de_route_step(
     return false;
 }
 
+
 // ==============================================================================
 // 1. SZYBKI RESET STANU
 // Czyści i przygotowuje kontekst przed symulacją.
@@ -650,6 +878,8 @@ double SabreDEHybridRouter::finalize_evaluation(DERunContext& ctx, const double*
     }
 
     // 3. Zebranie metryk max
+    max_physical_time = 0.0;
+    max_logical_depth = 0;
     for (double t : ctx.q_time) max_physical_time = fast_max_hyb(max_physical_time, t);
     for (int d : ctx.q_depth) max_logical_depth = fast_max_hyb(max_logical_depth, d);
 
@@ -671,6 +901,10 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
     DERunContext ctx(workspace);
 
     int gates_routed = 0;
+
+    // --- DODANE ZABEZPIECZENIA (Circuit Breaker) ---
+    int routing_iterations = 0;
+    const int MAX_ITERATIONS = std::max(10000, n_gates * 100);
 
     // --- ŁADOWANIE ZAPISANEGO STANU (Omijanie wykonanej pracy) ---
     if (load_snapshot && load_snapshot->is_valid) {
@@ -703,6 +937,12 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
 
     // --- GŁÓWNA PĘTLA SYMULACJI ---
     while (gates_routed < n_gates) {
+        // --- DODANY CIRCUIT BREAKER ---
+        if (++routing_iterations > MAX_ITERATIONS) {
+            ctx.total_routing_cost += 1e9; // Zabijamy fitness osobnika
+            break;
+        }
+
         // [NOWE] Czy osiągnęliśmy moment, w którym musimy zapisać zrzut?
         if (save_snapshot && !save_snapshot->is_valid && gates_routed >= save_snapshot->target_gates_routed) {
             save_snapshot->l2p = ctx.l2p; save_snapshot->p2l = ctx.p2l;
@@ -725,10 +965,20 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
             continue;
         }
 
-        // Możesz tu podmienić na naivą logikę w zależności od parametru (flagi klasowej)
+        // Możesz tu podmienić na naiwną logikę w zależności od parametru (flagi klasowej)
         build_lookahead_layers();
-        // if (!de_naive_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) break;
-        if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) break;
+
+        if (slow) {
+            if (!de_route_step_better<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) {
+                ctx.total_routing_cost += 1e9; // Utylizacja ślepego zaułka
+                break;
+            }
+        } else {
+            if (!de_route_step<LOGGING>(dag, workspace.front_layer, workspace.decay, ctx, genes, n_gates, out_log)) {
+                ctx.total_routing_cost += 1e9; // Utylizacja ślepego zaułka
+                break;
+            }
+        }
     }
 
     return finalize_evaluation<LOGGING>(ctx, genes, n_gates, p_cnt, out_swaps, out_moves, max_physical_time, max_logical_depth, out_log);
@@ -859,13 +1109,13 @@ void SabreDEHybridRouter::optimize(int pop_size, int generations, bool allow_laz
 // ==============================================================================
 // Przygotowanie środowiska, wygenerowanie "ziarna" za pomocą SABRE, a następnie zorganizowanie pętli przesuwającej okno wzdłuż osi czasu obwodu logicznego.
 // ==============================================================================
-void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_window, int window_size, double accept_ratio, bool allow_lazy_offboard, double f, double cr) {
+OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_window, int window_size, double accept_ratio, bool allow_lazy_offboard, double f, double cr) {
     std::cout << "\n[Hybryda 3.0 (WINDOWED)] Faza 1: Generowanie ziarna (Priority Seed) przez heurystykę SABRE...\n";
 
     // 1. Generujemy bazowy harmonogram logiczny przy pomocy czystej heurystyki SABRE.
     std::vector<int> logical_exec_order = prepare_sabre_seed();
     int n_gates = dag.nodes.size();
-    if (n_gates == 0) return; // Zabezpieczenie przed pustym obwodem
+    if (n_gates == 0) return {}; // Zabezpieczenie przed pustym obwodem
 
     // 2. Sprawdzenie, czy możemy użyć "Lazy Off-boarding" (odkładanie kubitów na wolne miejsca).
     bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
@@ -880,7 +1130,9 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
 
     // 3. Inicjalizacja populacji i generatora liczb pseudolosowych
     std::vector<double> pop(pop_size * n_genes), fitness(pop_size);
-    boost::random::xoshiro256pp rng(1337); // Użycie stałego ziarna (1337) zapewnia powtarzalność wyników
+    //todo zakomentuj
+    std::random_device rd;
+    boost::random::xoshiro256pp rng(rd()); // Użycie stałego ziarna (1337) zapewnia powtarzalność wyników
 
     // Populacja jest inicjalizowana m.in. ziarnem z SABRE, reszta jest losowa.
     initialize_de_population(pop_size, n_genes, n_gates, blocks, logical_exec_order, pop, fitness, rng, can_lazy);
@@ -949,9 +1201,8 @@ void SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_wi
     if (!validate_logical_circuit(final_log)) exit(-1);
     std::cout << "===================================\n";
 
-    // print_optimized_circuit(final_log);
-    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, std::chrono::duration<double>(end_time - start_time).count());
-    export_moves_to_file(final_log, "../hybrid_schedule_moves_windowed_" + name + ".txt");
+    // ZWRACASZ STRUKTURĘ Z ZESTAWEM DANYCH
+    return {final_score, final_makespan, final_depth, final_swaps, final_moves};
 }
 
 // ==============================================================================
@@ -1159,6 +1410,7 @@ void SabreDEHybridRouter::sabre_execute_gates(const HybridSabreDAG& current_dag,
     }
 }
 
+
 // ==============================================================================
 // sabre_route_step
 // Gdy utknęliśmy (brak bramek w odległości 1), szukamy najlepszego swapu/ruchu.
@@ -1169,8 +1421,7 @@ bool SabreDEHybridRouter::sabre_route_step(
     const std::vector<std::vector<int>>& lookahead_layers,
     SabreRunContext& ctx)
 {
-    // 1. Zbieramy "aktywne kubity" - tylko te fizyczne, które są zaangażowane
-    // w bramki aktualnie czekające we front_layer, opłaca nam się przesuwać.
+    // 1. Zbieramy "aktywne kubity"
     std::vector<bool> in_active(topo.qubits.size(), false);
     std::vector<int> active_phys_qubits;
     active_phys_qubits.reserve(num_qubits);
@@ -1187,77 +1438,97 @@ bool SabreDEHybridRouter::sabre_route_step(
         }
     }
 
+    // --- [NOWE] PRE-KALKULACJA KOSZTÓW BAZOWYCH ---
+    double base_f_score = 0.0;
+    for (int gate_id : front_layer) {
+        const auto& n = current_dag.nodes[gate_id];
+        if (n.lq2 != -1) {
+            base_f_score += get_distance(ctx.state.logical_to_phys_qubit[n.lq1], ctx.state.logical_to_phys_qubit[n.lq2]);
+        }
+    }
+
+    std::vector<double> base_ext_scores(lookahead_layers.size(), 0.0);
+    for (size_t d = 0; d < lookahead_layers.size(); ++d) {
+        for (int gate_id : lookahead_layers[d]) {
+            const auto& n = current_dag.nodes[gate_id];
+            if (n.lq2 != -1) {
+                base_ext_scores[d] += get_distance(ctx.state.logical_to_phys_qubit[n.lq1], ctx.state.logical_to_phys_qubit[n.lq2]);
+            }
+        }
+    }
+    // ----------------------------------------------
+
     struct SwapCandidate { int p1, p2, r_shared; double score; };
     std::vector<SwapCandidate> candidates;
     candidates.reserve(topo.qubits.size() * 4);
 
     // 2. Szukamy krawędzi (kandydatów na wymianę).
-    // Dla każdego aktywnego kubitu sprawdzamy sąsiadów dostępnych poprzez jego rezonatory.
     for (int p : active_phys_qubits) {
         for (int r : topo.qubits[p].connected_resonators) {
             for (int neighbor_p : topo.resonators[r].connected_qubits) {
                 if (p == neighbor_p) continue;
 
-                // Standaryzacja identyfikatora krawędzi (mniejsze id najpierw), by uniknąć duplikatów
                 int u = std::min(p, neighbor_p);
                 int v = std::max(p, neighbor_p);
 
-                // O(N) deduplikacja (można to przyspieszyć hashsetem lub flagami)
                 bool already_added = false;
                 for (const auto& c : candidates) {
                     if (c.p1 == u && c.p2 == v) { already_added = true; break; }
                 }
                 if (already_added) continue;
 
-                // --- 3. Obliczanie punktacji (SCORE) dla ruchu ---
-                double score_F = 0.0;
-
-                // Badamy wpływ na front_layer (natychmiastowe potrzeby)
+                // --- [NOWE] DELTA SCORING DLA FRONT LAYER ---
+                double delta_f = 0.0;
                 for (int gate_id : front_layer) {
                     const auto& n = current_dag.nodes[gate_id];
                     if (n.lq2 != -1) {
                         int lq1_p = ctx.state.logical_to_phys_qubit[n.lq1];
                         int lq2_p = ctx.state.logical_to_phys_qubit[n.lq2];
 
-                        // Symulacja zamiany
-                        if (lq1_p == p) lq1_p = neighbor_p; else if (lq1_p == neighbor_p) lq1_p = p;
-                        if (lq2_p == p) lq2_p = neighbor_p; else if (lq2_p == neighbor_p) lq2_p = p;
-
-                        score_F += get_distance(lq1_p, lq2_p);
+                        // Obliczamy deltę tylko jeśli ruch (u, v) wpływa na tę bramkę
+                        if (lq1_p == u || lq1_p == v || lq2_p == u || lq2_p == v) {
+                            int new_l1 = (lq1_p == u) ? v : ((lq1_p == v) ? u : lq1_p);
+                            int new_l2 = (lq2_p == u) ? v : ((lq2_p == v) ? u : lq2_p);
+                            delta_f += (get_distance(new_l1, new_l2) - get_distance(lq1_p, lq2_p));
+                        }
                     }
                 }
 
-                double f_norm = front_layer.empty() ? 0 : (score_F / front_layer.size());
+                double sF = base_f_score + delta_f;
+                double f_norm = front_layer.empty() ? 0 : (sF / front_layer.size());
 
-                // --- Wpływ na warstwy w głębi (Lookahead) z zanikającą wagą ---
+                // --- [NOWE] DELTA SCORING DLA 20-WARSTWOWEGO LOOKAHEAD ---
                 double ext_score = 0.0;
-                double layer_weight = EXTENDED_LAYER_WEIGHT; // Bazowo np. 0.5
+                double layer_weight = EXTENDED_LAYER_WEIGHT;
 
-                for (const auto& layer : lookahead_layers) {
-                    if (layer.empty()) continue;
+                for (size_t d = 0; d < lookahead_layers.size(); ++d) {
+                    if (lookahead_layers[d].empty()) {
+                        layer_weight *= 0.5;
+                        continue;
+                    }
 
-                    double layer_score = 0.0;
-                    for (int gate_id : layer) {
+                    double delta_ext = 0.0;
+                    for (int gate_id : lookahead_layers[d]) {
                         const auto& n = current_dag.nodes[gate_id];
                         if (n.lq2 != -1) {
                             int lq1_p = ctx.state.logical_to_phys_qubit[n.lq1];
                             int lq2_p = ctx.state.logical_to_phys_qubit[n.lq2];
 
-                            // Symulacja zamiany miejscami
-                            if (lq1_p == p) lq1_p = neighbor_p; else if (lq1_p == neighbor_p) lq1_p = p;
-                            if (lq2_p == p) lq2_p = neighbor_p; else if (lq2_p == neighbor_p) lq2_p = p;
-
-                            layer_score += get_distance(lq1_p, lq2_p);
+                            // Ponownie - w głębokich warstwach przeliczamy tylko zmienione bramki
+                            if (lq1_p == u || lq1_p == v || lq2_p == u || lq2_p == v) {
+                                int new_l1 = (lq1_p == u) ? v : ((lq1_p == v) ? u : lq1_p);
+                                int new_l2 = (lq2_p == u) ? v : ((lq2_p == v) ? u : lq2_p);
+                                delta_ext += (get_distance(new_l1, new_l2) - get_distance(lq1_p, lq2_p));
+                            }
                         }
                     }
-                    // Dodajemy znormalizowany wynik z odpowiednią wagą
-                    ext_score += layer_weight * (layer_score / layer.size());
 
-                    // Każda kolejna warstwa w głąb jest o połowę mniej ważna
+                    double layer_score = base_ext_scores[d] + delta_ext;
+                    ext_score += layer_weight * (layer_score / lookahead_layers[d].size());
                     layer_weight *= 0.5;
                 }
 
-                // OSTATECZNY WYNIK: łączymy obie metryki i uwzględniamy karę za ping-pong (decay)
+                // OSTATECZNY WYNIK
                 double score = (f_norm + ext_score) * fast_max_hyb(ctx.decay[u], ctx.decay[v]);
                 candidates.push_back({u, v, r, score});
             }
@@ -1274,6 +1545,7 @@ bool SabreDEHybridRouter::sabre_route_step(
     }
 
     // 5. Egzekucja wybranego ruchu
+    // [Reszta oryginalnego kodu zostaje w 100% bez zmian]
     if (best_candidate != nullptr) {
         int p1 = best_candidate->p1, p2 = best_candidate->p2, r_step = best_candidate->r_shared;
 
@@ -1500,10 +1772,13 @@ bool SabreDEHybridRouter::de_naive_route_step(
     const double* genes, int n_gates,
     std::vector<RoutingRecord>* out_log)
 {
-    // 1. O(1) zbieranie aktywnych kubitów
+    // 1. Zbieranie aktywnych kubitów i lokalizacji
     std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
     ctx.ws.active_phys.clear();
     ctx.ws.f_locs.clear();
+
+    // --- [NOWE] Obliczanie KOSZTU BAZOWEGO ---
+    double base_sF = 0.0;
 
     for (int gid : front_layer) {
         const auto& node = current_dag.nodes[gid];
@@ -1515,8 +1790,11 @@ bool SabreDEHybridRouter::de_naive_route_step(
             ctx.ws.in_active[ctx.l2p[node.lq2]] = 1;
             ctx.ws.active_phys.push_back(ctx.l2p[node.lq2]);
         }
-        // Cache dla lokalizacji docelowych we front_layer
-        if (node.lq2 != -1) ctx.ws.f_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+        // Cache dla lokalizacji docelowych we front_layer + nabijanie BAZY
+        if (node.lq2 != -1) {
+            ctx.ws.f_locs.push_back({ctx.l2p[node.lq1], ctx.l2p[node.lq2]});
+            base_sF += get_distance(ctx.l2p[node.lq1], ctx.l2p[node.lq2]);
+        }
     }
 
     ctx.ws.route_step_counter++;
@@ -1526,43 +1804,54 @@ bool SabreDEHybridRouter::de_naive_route_step(
     double best_score = std::numeric_limits<double>::max();
     int best_p1 = -1, best_p2 = -1, best_r = -1;
 
-    // 2. Szukanie krawędzi (bez patrzenia w głąb!)
+    // 2. Szukanie krawędzi przy użyciu DELTA SCORING O(k)
     for (int p : ctx.ws.active_phys) {
-        for (int r : topo.qubits[p].connected_resonators) {
-            for (int nb : topo.resonators[r].connected_qubits) {
-                if (p == nb) continue;
-                int u = std::min(p, nb), v = std::max(p, nb);
+        // Wyciągamy zakres z płaskiego wektora w czasie O(1)
+        int start_idx = precomputed_swaps_offsets[p];
+        int end_idx = precomputed_swaps_offsets[p + 1];
 
-                int edge_idx = u * p_cnt + v;
-                if (ctx.ws.seen_edges[edge_idx] == step_id) continue;
-                ctx.ws.seen_edges[edge_idx] = step_id;
+        for (int i = start_idx; i < end_idx; ++i) {
+            const auto& edge = flat_precomputed_swaps[i];
+            int nb = edge.neighbor;
+            int r = edge.resonator;
 
-                double sF = 0;
-                // Skupiamy się WYŁĄCZNIE na front_layer
-                for (const auto& loc : ctx.ws.f_locs) {
-                    int l1 = loc.first, l2 = loc.second;
-                    if (l1 == p) l1 = nb; else if (l1 == nb) l1 = p;
-                    if (l2 == p) l2 = nb; else if (l2 == nb) l2 = p;
-                    sF += get_distance(l1, l2);
+            int u = std::min(p, nb), v = std::max(p, nb);
+
+            int edge_idx = u * p_cnt + v;
+            if (ctx.ws.seen_edges[edge_idx] == step_id) continue;
+            ctx.ws.seen_edges[edge_idx] = step_id;
+
+            // Liczymy wyłącznie DELTĘ zmian
+            double delta_sF = 0.0;
+            for (const auto& loc : ctx.ws.f_locs) {
+                int l1 = loc.first, l2 = loc.second;
+
+                // Sprawdzamy tylko te bramki, których dotyka ten specyficzny SWAP
+                if (l1 == u || l1 == v || l2 == u || l2 == v) {
+                    int new_l1 = (l1 == u) ? v : ((l1 == v) ? u : l1);
+                    int new_l2 = (l2 == u) ? v : ((l2 == v) ? u : l2);
+                    delta_sF += (get_distance(new_l1, new_l2) - get_distance(l1, l2));
                 }
+            }
 
-                double f_norm = ctx.ws.f_locs.empty() ? 0 : (sF / ctx.ws.f_locs.size());
+            // Ostateczny koszt to Baza + Delta
+            double sF = base_sF + delta_sF;
+            double f_norm = ctx.ws.f_locs.empty() ? 0 : (sF / ctx.ws.f_locs.size());
 
-                // Mutacja wprowadzająca czynnik losowy z algorytmu DE
-                double mutation = 0.95 + (genes[u % n_gates] * 0.1);
+            // Mutacja wprowadzająca czynnik losowy z algorytmu DE
+            double mutation = 0.95 + (genes[u % n_gates] * 0.1);
 
-                // Brak ext_score! Wynik opiera się tylko na f_norm i karach (decay).
-                double score = f_norm * fast_max_hyb(decay[u], decay[v]) * mutation;
+            // Wynik opiera się na f_norm i karach (decay)
+            double score = f_norm * fast_max_hyb(decay[u], decay[v]) * mutation;
 
-                if (score < best_score) {
-                    best_score = score;
-                    best_p1 = u; best_p2 = v; best_r = r;
-                }
+            if (score < best_score) {
+                best_score = score;
+                best_p1 = u; best_p2 = v; best_r = r;
             }
         }
     }
 
-    // 3. Wykonanie ruchu na najlepszym kandydacie (kod identyczny jak w pełnym kroku)
+    // 3. Wykonanie ruchu na najlepszym kandydacie (część wykonawcza bez zmian)
     if (best_p1 != -1) {
         int p1 = best_p1, p2 = best_p2, r_step = best_r;
 

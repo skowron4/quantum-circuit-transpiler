@@ -241,37 +241,65 @@ void SabreRouter::update_active_and_extended_layers(const SabreDAG& current_dag,
     }
 }
 
-SwapCandidate SabreRouter::find_best_swap_candidate(const SabreDAG& current_dag, const MachineState& state,
-                                                    const std::vector<int>& front_layer, const std::vector<int>& extended_layer,
-                                                    const std::vector<int>& active_phys_qubits, const std::vector<double>& decay) const {
-    std::vector<SwapCandidate> candidates;
-    candidates.reserve(topo.qubits.size() * 4);
+SwapCandidate SabreRouter::find_best_swap_candidate(
+    const SabreDAG& current_dag,
+    const MachineState& state,
+    const std::vector<int>& front_layer,
+    const std::vector<std::vector<int>>& lookahead_layers, // Przekazujemy zebrany lookahead
+    const std::vector<int>& active_phys_qubits,
+    const std::vector<double>& decay,
+    int max_lookahead_depth,       // [ZMIENNA STERUJĄCA] Ile warstw w głąb analizujemy
+    double lookahead_weight_base, // Podstawowa waga dla warstw rozszerzonych
+    double lookahead_decay_rate   // [ZMIENNA STERUJĄCA] Jak szybko waga spada z głębokością
+) const {
 
     int p_cnt = topo.qubits.size();
-    std::vector<uint8_t> seen_pairs(p_cnt * p_cnt, 0); // O(1) tablica sprawdzen
+    std::vector<uint8_t> seen_pairs(p_cnt * p_cnt, 0);
 
-    // OPTYMALIZACJA 2: Zamiast fizycznych pair, zapamiętujemy LOGICZNE
-    // Dzięki temu możemy wyeliminować instrukcje 'if' podczas ewaluacji
-    std::vector<std::pair<int, int>> front_logical_pairs;
-    front_logical_pairs.reserve(front_layer.size());
+    // --- 1. PREKALKULACJA I FILTROWANIE PAR ---
+    // Pobieramy bazowe ułożenie tylko RAZ
+    const auto& current_l2p = state.logical_to_phys_qubit;
+
+    double base_score_F = 0.0;
+    std::vector<LogicalPair> front_pairs;
+    front_pairs.reserve(front_layer.size());
+
     for (int gate_id : front_layer) {
         const GateNode& n = current_dag.nodes[gate_id];
-        if (n.lq2 != -1) front_logical_pairs.emplace_back(n.lq1, n.lq2);
+        if (n.lq2 != -1) {
+            front_pairs.push_back({n.lq1, n.lq2, 1.0}); // Front layer ma zawsze wagę 1.0
+            base_score_F += get_distance(current_l2p[n.lq1], current_l2p[n.lq2]);
+        }
     }
+    double f_norm_base = front_pairs.empty() ? 0 : (base_score_F / front_pairs.size());
 
-    std::vector<std::pair<int, int>> ext_logical_pairs;
-    ext_logical_pairs.reserve(extended_layer.size());
-    for (int gate_id : extended_layer) {
-        const GateNode& n = current_dag.nodes[gate_id];
-        if (n.lq2 != -1) ext_logical_pairs.emplace_back(n.lq1, n.lq2);
+    // Agregujemy warstwy lookahead w jedną płaską listę, ale z zanikającą wagą
+    double base_score_E = 0.0;
+    double total_e_weight = 0.0;
+    std::vector<LogicalPair> ext_pairs;
+
+    double current_layer_weight = lookahead_weight_base;
+    int depth_limit = std::min(max_lookahead_depth, (int)lookahead_layers.size());
+
+    for (int d = 0; d < depth_limit; ++d) {
+        for (int gate_id : lookahead_layers[d]) {
+            const GateNode& n = current_dag.nodes[gate_id];
+            if (n.lq2 != -1) {
+                ext_pairs.push_back({n.lq1, n.lq2, current_layer_weight});
+                base_score_E += current_layer_weight * get_distance(current_l2p[n.lq1], current_l2p[n.lq2]);
+                total_e_weight += current_layer_weight;
+            }
+        }
+        current_layer_weight *= lookahead_decay_rate; // Spadek wagi dla głębszych warstw
     }
+    double e_norm_base = ext_pairs.empty() ? 0 : (base_score_E / total_e_weight);
 
-    // Ekstremalnie szybka lokalna kopia bieżącego mapowania dla O(1) dostępu w cache
-    std::vector<int> current_l2p = state.logical_to_phys_qubit;
 
-    // OPTYMALIZACJA 1: Korzystamy z prekompilowanego, płaskiego wektora ścieżek SwapEdge
+    // --- 2. EWALUACJA DELTA (O(k) zamiast O(N)) ---
+    SwapCandidate best_candidate = {-1, -1, -1, std::numeric_limits<double>::max()};
+
     for (int p : active_phys_qubits) {
-        for (const SwapEdge& edge : precomputed_swaps[p]) {
+        for (const stockSwapEdge& edge : precomputed_swaps[p]) {
             int neighbor_p = edge.neighbor;
             int r = edge.resonator;
 
@@ -282,44 +310,59 @@ SwapCandidate SabreRouter::find_best_swap_candidate(const SabreDAG& current_dag,
             if (seen_pairs[pair_idx]) continue;
             seen_pairs[pair_idx] = 1;
 
-            // Sprawdzamy jakie kubity logiczne zamierzamy podmienić
             int lq_p = state.phys_qubit_to_logical[p];
             int lq_neighbor = state.phys_qubit_to_logical[neighbor_p];
 
-            // Wirtualny swap - operacja w pełni O(1) na tablicy intów
-            if (lq_p != -1) current_l2p[lq_p] = neighbor_p;
-            if (lq_neighbor != -1) current_l2p[lq_neighbor] = p;
+            // Jeśli wymieniamy dwa puste kubity fizyczne - ignorujemy (bezużyteczne)
+            if (lq_p == -1 && lq_neighbor == -1) continue;
 
-            double score_F = 0.0;
-            // Branchless pętla - procesor z łatwością wektoryzuje sumowanie
-            for (const auto& pr : front_logical_pairs) {
-                score_F += get_distance(current_l2p[pr.first], current_l2p[pr.second]);
+            // Zmienne na akumulację zmian (Delta)
+            double delta_F = 0.0;
+            double delta_E = 0.0;
+
+            // Ewaluacja Front Layer (tylko wpływowe bramki!)
+            for (const auto& pr : front_pairs) {
+                // Czy ten SWAP wpływa na tę konkretną bramkę?
+                if (pr.lq1 == lq_p || pr.lq2 == lq_p || pr.lq1 == lq_neighbor || pr.lq2 == lq_neighbor) {
+                    int old_u = current_l2p[pr.lq1];
+                    int old_v = current_l2p[pr.lq2];
+
+                    // Wyznaczamy nowe lokacje O(1) bez faktycznego zmieniania wektora
+                    int new_u = (pr.lq1 == lq_p) ? neighbor_p : ((pr.lq1 == lq_neighbor) ? p : old_u);
+                    int new_v = (pr.lq2 == lq_p) ? neighbor_p : ((pr.lq2 == lq_neighbor) ? p : old_v);
+
+                    delta_F += (get_distance(new_u, new_v) - get_distance(old_u, old_v));
+                }
             }
 
-            double score_E = 0.0;
-            // Branchless pętla
-            for (const auto& pr : ext_logical_pairs) {
-                score_E += get_distance(current_l2p[pr.first], current_l2p[pr.second]);
+            // Ewaluacja Lookahead (Extended) Layer
+            for (const auto& pr : ext_pairs) {
+                if (pr.lq1 == lq_p || pr.lq2 == lq_p || pr.lq1 == lq_neighbor || pr.lq2 == lq_neighbor) {
+                    int old_u = current_l2p[pr.lq1];
+                    int old_v = current_l2p[pr.lq2];
+
+                    int new_u = (pr.lq1 == lq_p) ? neighbor_p : ((pr.lq1 == lq_neighbor) ? p : old_u);
+                    int new_v = (pr.lq2 == lq_p) ? neighbor_p : ((pr.lq2 == lq_neighbor) ? p : old_v);
+
+                    // Pamiętamy o przemnożeniu przez wagę warstwy!
+                    delta_E += pr.weight * (get_distance(new_u, new_v) - get_distance(old_u, old_v));
+                }
             }
 
-            // Cofnięcie wirtualnego swapa
-            if (lq_p != -1) current_l2p[lq_p] = p;
-            if (lq_neighbor != -1) current_l2p[lq_neighbor] = neighbor_p;
+            // --- 3. OBLICZANIE WYNIKU KOŃCOWEGO ---
+            // Zamiast score = suma_wszystkiego, robimy score = baza + delta
+            double f_norm_new = front_pairs.empty() ? 0 : ((base_score_F + delta_F) / front_pairs.size());
+            double e_norm_new = ext_pairs.empty() ? 0 : ((base_score_E + delta_E) / total_e_weight);
 
-            double f_norm = front_layer.empty() ? 0 : (score_F / front_layer.size());
-            double e_norm = extended_layer.empty() ? 0 : (score_E / extended_layer.size());
+            // Klasyczna heurystyka SABRE uwzględniająca decay kubitów fizycznych (karanie "ping-ponga")
+            double score = (f_norm_new + EXTENDED_LAYER_WEIGHT * e_norm_new) * fast_max_sabre(decay[u], decay[v]);
 
-            double score = (f_norm + EXTENDED_LAYER_WEIGHT * e_norm) * fast_max_sabre(decay[u], decay[v]);
-            candidates.push_back({u, v, r, score});
+            if (score < best_candidate.score) {
+                best_candidate = {u, v, r, score};
+            }
         }
     }
 
-    SwapCandidate best_candidate = {-1, -1, -1, std::numeric_limits<double>::max()};
-    for (const auto& candidate : candidates) {
-        if (candidate.score < best_candidate.score) {
-            best_candidate = candidate;
-        }
-    }
     return best_candidate;
 }
 
@@ -463,9 +506,50 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
             continue;
         }
 
-        update_active_and_extended_layers(current_dag, front_layer, state, active_phys_qubits, in_active, extended_layer, in_extended);
+        // --- ZMIANA: Zbieranie aktywnych kubitów i budowanie 2D Lookahead ---
 
-        SwapCandidate best_candidate = find_best_swap_candidate(current_dag, state, front_layer, extended_layer, active_phys_qubits, decay);
+        // 1. Zbieramy aktywne fizyczne kubity z front_layer
+        for (int p : active_phys_qubits) in_active[p] = 0;
+        active_phys_qubits.clear();
+        for (int gate_id : front_layer) {
+            const GateNode& node = current_dag.nodes[gate_id];
+            if (node.lq1 != -1) {
+                int p1 = state.logical_to_phys_qubit[node.lq1];
+                if (!in_active[p1]) { in_active[p1] = 1; active_phys_qubits.push_back(p1); }
+            }
+            if (node.lq2 != -1) {
+                int p2 = state.logical_to_phys_qubit[node.lq2];
+                if (!in_active[p2]) { in_active[p2] = 1; active_phys_qubits.push_back(p2); }
+            }
+        }
+
+        // 2. Budowanie wielowarstwowego Lookaheada (zastępuje extended_layer)
+        const int MAX_LOOKAHEAD = 20; // Ile warstw w głąb DAG-a sprawdzamy
+        std::vector<std::vector<int>> lookahead_layers;
+        lookahead_layers.reserve(MAX_LOOKAHEAD);
+
+        std::fill(in_extended.begin(), in_extended.end(), 0); // Reset odwiedzin
+        std::vector<int> current_level = front_layer;
+
+        for (int d = 0; d < MAX_LOOKAHEAD; ++d) {
+            std::vector<int> next_level;
+            for (int gate_id : current_level) {
+                for (int nxt : current_dag.nodes[gate_id].next_gates) {
+                    if (!in_extended[nxt]) {
+                        in_extended[nxt] = 1;
+                        next_level.push_back(nxt);
+                    }
+                }
+            }
+            if (next_level.empty()) break;
+            lookahead_layers.push_back(next_level);
+            current_level = next_level; // Schodzimy poziom głębiej
+        }
+
+        // 3. Wywołanie nowej, zoptymalizowanej heurystyki szukającej SWAP/MOVE
+        SwapCandidate best_candidate = find_best_swap_candidate(
+            current_dag, state, front_layer, lookahead_layers, active_phys_qubits, decay
+        );
 
         if (best_candidate.p1 != -1) {
             apply_swap_candidate(best_candidate, state, q_logical_depth, log, decay, out_moves, out_swaps, total_routing_cost, is_final);

@@ -14,6 +14,21 @@
 #include <limits>
 #include <boost/random/xoshiro.hpp>
 
+struct OptimizationResult {
+    double score;
+    double makespan;
+    int depth;
+    int swaps;
+    int moves;
+};
+
+struct SwapEdge { int neighbor; int resonator; };
+
+struct QubitInteraction {
+    int target;
+    double weight;
+};
+
 struct DEStateSnapshot {
     bool is_valid = false;
     int target_gates_routed = 0;
@@ -69,6 +84,9 @@ struct HybridWorkspace {
     std::vector<int> lookahead_offsets;
     std::vector<std::pair<int, int>> flat_lookahead_locs;
     std::vector<int> lookahead_locs_offsets;
+    static constexpr int MAX_INTER_PER_Q = 64; // Zapas, którego praktycznie nigdy nie przekroczymy
+    std::vector<QubitInteraction> flat_interactions;
+    std::vector<int> interaction_counts;
 };
 
 // Stan maszyny wyłącznie dla przebiegu SABRE
@@ -125,6 +143,11 @@ private:
     std::string name;
     int max_look_ahead_depth;
 
+    bool slow;
+
+    std::vector<SwapEdge> flat_precomputed_swaps;
+    std::vector<int> precomputed_swaps_offsets;
+
     mutable std::vector<int> dist_cache;
     HybridSabreDAG dag;
     HybridSabreDAG reversed_dag;
@@ -173,11 +196,20 @@ private:
 
     template <bool LOGGING>
     bool de_route_step(const HybridSabreDAG& current_dag,
-    const std::vector<int>& front_layer,
-    std::vector<double>& decay,
-    DERunContext& ctx,
-    const double* genes, int n_gates,
-    std::vector<RoutingRecord>* out_log);
+        const std::vector<int>& front_layer,
+        std::vector<double>& decay,
+        DERunContext& ctx,
+        const double* genes, int n_gates,
+        std::vector<RoutingRecord>* out_log);
+
+    template <bool LOGGING>
+    bool de_route_step_better(
+        const HybridSabreDAG& current_dag,
+        const std::vector<int>& front_layer,
+        std::vector<double>& decay,
+        DERunContext& ctx,
+        const double* genes, int n_gates,
+        std::vector<RoutingRecord>* out_log);
 
     template <bool LOGGING>
     double evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard, DEStateSnapshot* load_snapshot = nullptr, DEStateSnapshot* save_snapshot = nullptr);
@@ -193,10 +225,10 @@ private:
     bool validate_logical_circuit(const std::vector<RoutingRecord>& log) const;
 
 public:
-    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth = 1);
+    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow = false, int max_look_ahead_depth = 1);
 
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
-    void optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
+    OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
 };
 
 #endif //MAGISTERKA_SABREDEHYBRIDROUTER_H

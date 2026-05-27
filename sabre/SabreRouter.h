@@ -17,6 +17,12 @@ inline double fast_max_sabre(double a, double b) {
     return (a > b) ? a : b;
 }
 
+struct LogicalPair {
+    int lq1;
+    int lq2;
+    double weight; // Waga zależna od głębokości warstwy
+};
+
 struct SabreDAG {
     std::vector<GateNode> nodes;
     std::vector<int> initial_deps;
@@ -28,7 +34,7 @@ struct SwapCandidate {
 };
 
 // NOWE: Struktura prekompilowanych krawędzi
-struct SwapEdge {
+struct stockSwapEdge {
     int neighbor;
     int resonator;
 };
@@ -53,7 +59,7 @@ private:
     std::string name;
 
     mutable std::vector<int> dist_cache;
-    std::vector<std::vector<SwapEdge>> precomputed_swaps; // NOWE
+    std::vector<std::vector<stockSwapEdge>> precomputed_swaps; // NOWE
     SabreDAG dag;
     SabreDAG reversed_dag;
 
@@ -78,9 +84,17 @@ private:
                                            std::vector<uint8_t>& in_active, std::vector<int>& extended_layer,
                                            std::vector<uint8_t>& in_extended) const;
 
-    SwapCandidate find_best_swap_candidate(const SabreDAG& current_dag, const MachineState& state,
-                                           const std::vector<int>& front_layer, const std::vector<int>& extended_layer,
-                                           const std::vector<int>& active_phys_qubits, const std::vector<double>& decay) const;
+    SwapCandidate find_best_swap_candidate(
+    const SabreDAG& current_dag,
+    const MachineState& state,
+    const std::vector<int>& front_layer,
+    const std::vector<std::vector<int>>& lookahead_layers,
+    const std::vector<int>& active_phys_qubits,
+    const std::vector<double>& decay,
+    int max_lookahead_depth = 5,
+    double lookahead_weight_base = 0.5,
+    double lookahead_decay_rate = 0.5
+) const;
 
     void apply_swap_candidate(const SwapCandidate& candidate, MachineState& state, std::vector<int>& q_logical_depth,
                               std::vector<RoutingRecord>& log, std::vector<double>& decay, int& out_moves, int& out_swaps,
