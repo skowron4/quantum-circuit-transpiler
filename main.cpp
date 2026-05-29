@@ -41,8 +41,8 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     sabre.run_benchmark();
 
     // 4. Wykonanie algorytmu DEHybridSabre
-    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 50);
-    SabreDERouter.optimize_windowed(100, 5000, 150, 1.0, false, 0.9);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, true, 2);
+    SabreDERouter.optimize_windowed(30, 300, 500, 0.7, false, 0.9);
 
     // 5. Wykonanie algorytmu newDEHybridSabre
     // newSabreDEHybridRouter newSabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
@@ -58,7 +58,7 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     int logical_qubits_count = qpu.get_num_qubits() * 1.0;
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
-    std::vector<Gate> circuit = generator.generate(200, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
@@ -72,10 +72,10 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     results.reserve(NUM_RUNS);
 
     for (int i = 0; i < NUM_RUNS; ++i) {
-        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 15);
+        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 4);
 
         // Odbieramy całą strukturę wyników
-        OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 500, 0.7,  false, 0.9);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 200, 500, 0.7,  false, 0.9);
         results.push_back(res);
 
         std::cout << "Iteracja " << (i + 1) << " zakonczona. "
@@ -116,16 +116,16 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     std::cout << "============================================\n";
 
     std::cout << " [SCORE]\n";
-    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Średnia: " << (sum_val.score / NUM_RUNS) << "\n\n";
+    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Średnia: " << (sum_val.score / NUM_RUNS) << "\n";
 
     std::cout << " [MAKESPAN]\n";
-    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Średnia: " << (sum_val.makespan / NUM_RUNS) << "\n\n";
+    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Średnia: " << (sum_val.makespan / NUM_RUNS) << "\n";
 
     std::cout << " [DEPTH]\n";
-    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Średnia: " << (static_cast<double>(sum_val.depth) / NUM_RUNS) << "\n\n";
+    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Średnia: " << (static_cast<double>(sum_val.depth) / NUM_RUNS) << "\n";
 
     std::cout << " [SWAPS]\n";
-    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Średnia: " << (static_cast<double>(sum_val.swaps) / NUM_RUNS) << "\n\n";
+    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Średnia: " << (static_cast<double>(sum_val.swaps) / NUM_RUNS) << "\n";
 
     std::cout << " [MOVES]\n";
     std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Średnia: " << (static_cast<double>(sum_val.moves) / NUM_RUNS) << "\n";
@@ -141,14 +141,14 @@ int main() {
     SetConsoleCP(CP_UTF8);
 #endif
     // Topologia siatki 2x2
-    // IQMConstellation gridQpu(5, 5);
-    // run_test_for_topology(gridQpu, "Siatka 3x3");
+    IQMConstellation gridQpu(3, 3);
+    run_test_for_topology(gridQpu, "Siatka 3x3");
     // run_test_for_topologyII(gridQpu, "Siatka 5x5");
 
     // Topologia trójkątna
     IQMTriangleConstellation triangleQpu;
     // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
-    run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
+    // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
 
     return 0;
 }

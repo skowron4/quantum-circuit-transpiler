@@ -107,28 +107,31 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
 // ==============================================================================
 // OBLICZANIE ODLEGŁOŚCI Z CACHE
 // ==============================================================================
-int SabreDEHybridRouter::get_distance(int p1, int p2) const {
-    // if (p1 == p2) return 0; // Odległość do samego siebie to zawsze 0
-    // int p_cnt = topo.qubits.size();
-    //
-    // // Używamy spłaszczonej tablicy 1D jako macierzy 2D.
-    // // Wzór na indeks to: wiersz * szerokość + kolumna
-    // int idx = p1 * p_cnt + p2;
-    //
-    // // Jeśli wartość nie jest -1, to znaczy, że już to kiedyś liczyliśmy.
-    // // O(1) zwrot z bufora - oszczędza mnóstwo czasu!
-    // if (dist_cache[idx] != -1) return dist_cache[idx];
-    //
-    // // Jeśli liczymy to pierwszy raz: odpytujemy topologię o ścieżkę
-    // // i liczymy ile po drodze jest rezonatorów (to nasza odległość).
-    // int dist = topo.get_routing_path(p1, p2).resonators.size();
-    //
-    // // Zapisujemy wynik do cache SYMETRYCZNIE.
-    // // Odległość z p1 do p2 jest taka sama jak z p2 do p1.
-    // dist_cache[idx] = dist;
-    // dist_cache[p2 * p_cnt + p1] = dist;
+int SabreDEHybridRouter::get_distance_old(int p1, int p2) const {
+    if (p1 == p2) return 0; // Odległość do samego siebie to zawsze 0
+    int p_cnt = topo.qubits.size();
 
-    // return dist;
+    // Używamy spłaszczonej tablicy 1D jako macierzy 2D.
+    // Wzór na indeks to: wiersz * szerokość + kolumna
+    int idx = p1 * p_cnt + p2;
+
+    // Jeśli wartość nie jest -1, to znaczy, że już to kiedyś liczyliśmy.
+    // O(1) zwrot z bufora - oszczędza mnóstwo czasu!
+    if (dist_cache[idx] != -1) return dist_cache[idx];
+
+    // Jeśli liczymy to pierwszy raz: odpytujemy topologię o ścieżkę
+    // i liczymy ile po drodze jest rezonatorów (to nasza odległość).
+    int dist = topo.get_routing_path(p1, p2).resonators.size();
+
+    // Zapisujemy wynik do cache SYMETRYCZNIE.
+    // Odległość z p1 do p2 jest taka sama jak z p2 do p1.
+    dist_cache[idx] = dist;
+    dist_cache[p2 * p_cnt + p1] = dist;
+
+    return dist;
+}
+
+int SabreDEHybridRouter::get_distance(int p1, int p2) const {
     return dist_cache[p1 * topo.qubits.size() + p2];
 }
 
@@ -1200,7 +1203,9 @@ OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int gene
     std::cout << "\n=== WALIDACJA OBWODU LOGICZNEGO ===\n";
     if (!validate_logical_circuit(final_log)) exit(-1);
     std::cout << "===================================\n";
-
+    // print_optimized_circuit(final_log);
+    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, std::chrono::duration<double>(end_time - start_time).count());
+    export_moves_to_file(final_log, "../hybrid_schedule_moves_" + name + ".txt");
     // ZWRACASZ STRUKTURĘ Z ZESTAWEM DANYCH
     return {final_score, final_makespan, final_depth, final_swaps, final_moves};
 }
@@ -1751,13 +1756,16 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
     // 1. Przebieg do przodu (Forward): Ustala wstępne rozproszenie kubitów
     auto post_fwd = run_sabre_pass(dag, initial_mapping, false, nullptr);
 
-    // 2. Przebieg wsteczny (Backward): Wykonuje sabre na odwróconym grafie (reversed_dag).
-    // To kluczowy trick – pozwala "skorygować" mapowanie z końca obwodu do początku.
+    /// 2. Przebieg wsteczny (Backward)
     auto pre_final = run_sabre_pass(reversed_dag, post_fwd, false, nullptr);
 
-    // 3. Przebieg finalny: Generuje faktyczną kolejność wykonania bramek (logical_exec_order)
-    // bazując na wypracowanym przez dwa poprzednie kroki mapowaniu.
+    // [POPRAWKA]: Bezpieczne kopiowanie do wektora o rozmiarze fizycznym
+    std::fill(saved_initial_l2p.begin(), saved_initial_l2p.end(), -1); // Upewniamy się, że reszta to -1
+    std::copy(pre_final.begin(), pre_final.end(), saved_initial_l2p.begin());
+
+    // 3. Przebieg finalny: Generuje faktyczną kolejność wykonania bramek
     std::vector<int> logical_exec_order;
+    // Zauważ, że tu podajemy pre_final, bo run_sabre_pass oczekuje rozmiaru num_qubits
     run_sabre_pass(dag, pre_final, true, &logical_exec_order);
 
     return logical_exec_order;

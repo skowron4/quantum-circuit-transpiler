@@ -155,6 +155,7 @@ private:
     std::vector<int> saved_initial_l2p;
 
     // --- Metody Bazowe ---
+    int get_distance_old(int p1, int p2) const;
     int get_distance(int p1, int p2) const;
     HybridSabreDAG build_dag(const std::vector<Gate>& circuit) const;
 
