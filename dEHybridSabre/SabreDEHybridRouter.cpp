@@ -92,7 +92,8 @@ inline void SabreDEHybridRouter::allocate_workspace(int g_cnt) {
     workspace.active_phys.reserve(p_cnt);
 
     workspace.interaction_counts.assign(p_cnt, 0);
-    workspace.flat_interactions.resize(p_cnt * HybridWorkspace::MAX_INTER_PER_Q);
+    workspace.inter_targets.resize(p_cnt * HybridWorkspace::MAX_INTER_PER_Q, 0);
+    workspace.inter_weights.resize(p_cnt * HybridWorkspace::MAX_INTER_PER_Q, 0.0);
 
     workspace.route_step_counter = 0;
     workspace.seen_edges.assign(p_cnt * p_cnt, 0);
@@ -264,14 +265,17 @@ inline int SabreDEHybridRouter::de_select_lazy_target(int p, int r, int gate_id,
     return p;
 }
 
-template <bool LOGGING>
-void SabreDEHybridRouter::de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
+template <bool LOGGING, bool CAN_LAZY>
+void SabreDEHybridRouter::de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log) {
     int r = ctx.q_on_res[p];
-    if (r == -1) return;
+    if (r == -1) return; // Szybkie wyjście
 
     int target_p = p;
-    if (can_lazy && gate_id >= 0) {
-        target_p = de_select_lazy_target(p, r, gate_id, ctx, genes, n_gates);
+    // Kompilator całkowicie usunie ten blok, jeśli CAN_LAZY == false (zero overhead)
+    if constexpr (CAN_LAZY) {
+        if (gate_id >= 0) {
+            target_p = de_select_lazy_target(p, r, gate_id, ctx, genes, n_gates);
+        }
     }
 
     double start = fast_max_hyb(ctx.q_time[p], ctx.r_time[r]);
@@ -307,9 +311,9 @@ void SabreDEHybridRouter::de_force_down(int& p, int gate_id, DERunContext& ctx, 
 // Wykonywanie bramek w zależności od piorytetu wygenerowanego przez DE
 // ==============================================================================
 template <bool LOGGING>
-inline void SabreDEHybridRouter::de_execute_1q_logic(const HybridGateNode& node, int p1, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
+void SabreDEHybridRouter::de_execute_1q_logic(const HybridGateNode& node, int p1, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
     if (node.q1_1q_count > 0) {
-        de_force_down<LOGGING>(p1, node.id, ctx, genes, n_gates, out_log, false);
+        de_force_down<LOGGING, false>(p1, node.id, ctx, genes, n_gates, out_log);
         if constexpr (LOGGING) {
             for (int k = 0; k < node.q1_1q_count; ++k)
                 out_log->push_back({OpType::GATE_1Q, node.q1_1q_ids[k], node.lq1, -1, p1, -1, -1, ctx.q_time[p1] + k});
@@ -320,12 +324,12 @@ inline void SabreDEHybridRouter::de_execute_1q_logic(const HybridGateNode& node,
 }
 
 template <bool LOGGING>
-inline bool SabreDEHybridRouter::de_execute_2q_logic(const HybridGateNode& node, int p1, int p2, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
+bool SabreDEHybridRouter::de_execute_2q_logic(const HybridGateNode& node, int p1, int p2, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
     // --- DYNAMICZNY SYSTEM ANTY-KOLIZYJNY ---
     if (get_distance(p1, p2) > 1) return false;
 
-    if (node.q1_1q_count > 0) de_force_down<LOGGING>(p1, node.id, ctx, genes, n_gates, out_log, false);
-    if (node.q2_1q_count > 0) de_force_down<LOGGING>(p2, node.id, ctx, genes, n_gates, out_log, false);
+    if (node.q1_1q_count > 0) de_force_down<LOGGING, false>(p1, node.id, ctx, genes, n_gates, out_log);
+    if (node.q2_1q_count > 0) de_force_down<LOGGING, false>(p2, node.id, ctx, genes, n_gates, out_log);
 
     if constexpr (LOGGING) {
         for (int k = 0; k < node.q1_1q_count; ++k) out_log->push_back({OpType::GATE_1Q, node.q1_1q_ids[k], node.lq1, -1, p1, -1, -1, ctx.q_time[p1] + k});
@@ -350,15 +354,16 @@ inline bool SabreDEHybridRouter::de_execute_2q_logic(const HybridGateNode& node,
         int p_in = q1_in ? p1 : p2;
         int p_stay = q1_in ? p2 : p1;
 
-        de_force_down<LOGGING>(p_stay, node.id, ctx, genes, n_gates, out_log, false);
+        de_force_down<LOGGING, false>(p_stay, node.id, ctx, genes, n_gates, out_log);
 
         if (ctx.res_occ[chosen_res] != -1 && ctx.res_occ[chosen_res] != p_in) {
-            de_force_down<LOGGING>(ctx.res_occ[chosen_res], node.id, ctx, genes, n_gates, out_log, can_lazy);
+            if (can_lazy) de_force_down<LOGGING, true>(ctx.res_occ[chosen_res], node.id, ctx, genes, n_gates, out_log);
+            else de_force_down<LOGGING, false>(ctx.res_occ[chosen_res], node.id, ctx, genes, n_gates, out_log);
         }
 
         double start;
         if (ctx.q_on_res[p_in] != chosen_res) {
-            de_force_down<LOGGING>(p_in, node.id, ctx, genes, n_gates, out_log, false);
+            de_force_down<LOGGING, false>(p_in, node.id, ctx, genes, n_gates, out_log);
             start = fast_max_hyb(ctx.q_time[p_in], fast_max_hyb(ctx.q_time[p_stay], ctx.r_time[chosen_res]));
 
             if constexpr (LOGGING) out_log->push_back({OpType::MOVE, node.id, ctx.p2l[p_in], -1, p_in, chosen_res + RES_OFFSET, -1, start});
@@ -441,10 +446,10 @@ inline void SabreDEHybridRouter::de_collect_active_qubits(const HybridSabreDAG& 
 }
 
 template <bool LOGGING>
-inline void SabreDEHybridRouter::de_execute_route_candidate(int p1, int p2, int r_step, DERunContext& ctx, std::vector<double>& decay, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
-    de_force_down<LOGGING>(p1, -1, ctx, genes, n_gates, out_log, false);
-    de_force_down<LOGGING>(p2, -1, ctx, genes, n_gates, out_log, false);
-    if (ctx.res_occ[r_step] != -1) de_force_down<LOGGING>(ctx.res_occ[r_step], -1, ctx, genes, n_gates, out_log, false);
+void SabreDEHybridRouter::de_execute_route_candidate(int p1, int p2, int r_step, DERunContext& ctx, std::vector<double>& decay, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy) {
+    de_force_down<LOGGING, false>(p1, -1, ctx, genes, n_gates, out_log);
+    de_force_down<LOGGING, false>(p2, -1, ctx, genes, n_gates, out_log);
+    if (ctx.res_occ[r_step] != -1) de_force_down<LOGGING, false>(ctx.res_occ[r_step], -1, ctx, genes, n_gates, out_log);
 
     double step_start = fast_max_hyb(ctx.q_time[p1], fast_max_hyb(ctx.r_time[r_step], ctx.q_time[p2]));
     bool is_move = (ctx.p2l[p2] == -1) || (ctx.p2l[p1] == -1);
@@ -496,8 +501,16 @@ bool SabreDEHybridRouter::de_route_step(
 
     auto add_interaction = [&](int q, int target, double weight) {
         int& cnt = ctx.ws.interaction_counts[q];
+
+        // Ufamy branch predictorowi procesora - warunek prawie zawsze będzie spełniony (true)
         if (cnt < HybridWorkspace::MAX_INTER_PER_Q) {
-            ctx.ws.flat_interactions[q * HybridWorkspace::MAX_INTER_PER_Q + cnt] = {target, weight};
+            // Obliczamy płaski indeks raz, unikając wielokrotnego mnożenia
+            int idx = q * HybridWorkspace::MAX_INTER_PER_Q + cnt;
+
+            // Rozdzielony zapis SoA (Structure of Arrays)
+            ctx.ws.inter_targets[idx] = target;
+            ctx.ws.inter_weights[idx] = weight;
+
             cnt++;
         }
     };
@@ -565,6 +578,8 @@ bool SabreDEHybridRouter::de_route_step(
     double best_score = std::numeric_limits<double>::max();
     int best_p1 = -1, best_p2 = -1, best_r = -1;
 
+    const int* dist_cache_ptr = dist_cache.data();
+
     for (int p : ctx.ws.active_phys) {
         int start_idx = precomputed_swaps_offsets[p];
         int end_idx = precomputed_swaps_offsets[p + 1];
@@ -581,18 +596,28 @@ bool SabreDEHybridRouter::de_route_step(
 
             double delta = 0.0;
 
+            // BŁYSKAWICZNE POZYCJONOWANIE W MACIERZY (Wskaźniki na konkretne "wiersze" kubitów u i v)
+            const int* dist_u = dist_cache_ptr + (u * p_cnt);
+            const int* dist_v = dist_cache_ptr + (v * p_cnt);
+
+            // Obliczanie wpływu 'u'
             int c_u = ctx.ws.interaction_counts[u];
             int off_u = u * HybridWorkspace::MAX_INTER_PER_Q;
+
+            // Dzięki rozdzieleniu na dwie tablice (SoA), kompilator z łatwością
+            // to zwektoryzuje (AVX2/SIMD) nakładając na siebie wektory intów i double.
             for (int k = 0; k < c_u; ++k) {
-                const auto& inter = ctx.ws.flat_interactions[off_u + k];
-                if (inter.target != v) delta += inter.weight * (get_distance(v, inter.target) - get_distance(u, inter.target));
+                int target = ctx.ws.inter_targets[off_u + k];
+                // (target != v) ewaluuje się do 1 (true) lub 0 (false)
+                delta += ctx.ws.inter_weights[off_u + k] * (dist_v[target] - dist_u[target]) * (target != v);
             }
 
+            // Obliczanie wpływu 'v'
             int c_v = ctx.ws.interaction_counts[v];
             int off_v = v * HybridWorkspace::MAX_INTER_PER_Q;
             for (int k = 0; k < c_v; ++k) {
-                const auto& inter = ctx.ws.flat_interactions[off_v + k];
-                if (inter.target != u) delta += inter.weight * (get_distance(u, inter.target) - get_distance(v, inter.target));
+                int target = ctx.ws.inter_targets[off_v + k];
+                delta += ctx.ws.inter_weights[off_v + k] * (dist_u[target] - dist_v[target]) * (target != u);
             }
 
             double score = (base_total_score + delta) * fast_max_hyb(decay[u], decay[v]);
@@ -604,7 +629,6 @@ bool SabreDEHybridRouter::de_route_step(
             }
         }
     }
-
     // 4. Egzekucja wybranego ruchu
     if (best_p1 != -1) {
         de_execute_route_candidate<LOGGING>(best_p1, best_p2, best_r, ctx, decay, genes, n_gates, out_log, false);
@@ -820,60 +844,42 @@ inline void SabreDEHybridRouter::extract_executable_gates(DERunContext& ctx) {
     workspace.front_layer.resize(write_idx);
 }
 
-// ==============================================================================
-// 4. BUDOWANIE LOOKAHEAD (PŁASKIE BFS Z EPOKAMI)
-// Poszukuje dalszych zależności bez alokacji nowych wektorów dla każdej głębokości.
-// ==============================================================================
-inline void SabreDEHybridRouter::setup_lookahead_bfs() {
-    workspace.flat_lookahead_layers.clear();
+inline void SabreDEHybridRouter::build_lookahead_layers() {
     workspace.lookahead_offsets.clear();
-    workspace.lookahead_offsets.push_back(0);
-
-    // O(1) resetowanie tablicy odwiedzin
     workspace.current_bfs_epoch++;
 
+    // O(1) Dostęp do surowej pamięci - nie alokujemy ani jednego bajta w locie!
+    // Zakładam, że workspace.flat_lookahead_layers jest prealokowane do wielkości obwodu (g_cnt)
+    int* queue = workspace.flat_lookahead_layers.data();
+    int head = 0;
+    int tail = 0;
+
+    // Kopiowanie warstwy wejściowej
     for (int gid : workspace.front_layer) {
         workspace.visited_epoch[gid] = workspace.current_bfs_epoch;
+        queue[tail++] = gid;
     }
 
-    // Startujemy BFS od kopii front_layer
-    workspace.exec_gates = workspace.front_layer;
-}
+    workspace.lookahead_offsets.push_back(0); // Offset początkowy (na warstwę 'front')
 
-inline void SabreDEHybridRouter::process_lookahead_layer() {
-    workspace.ext_layer.clear();
+    for (int depth = 0; depth < max_look_ahead_depth && head < tail; ++depth) {
+        int layer_end = tail;
+        workspace.lookahead_offsets.push_back(tail); // Początek faktycznej nowej warstwy lookahead
 
-    for (int gid : workspace.exec_gates) {
-        for (int nxt : dag.nodes[gid].next_gates) {
-            // Dodajemy bramkę tylko, jeśli nie była ruszana w obecnej epoce
-            if (workspace.visited_epoch[nxt] != workspace.current_bfs_epoch) {
-                workspace.visited_epoch[nxt] = workspace.current_bfs_epoch;
-                workspace.ext_layer.push_back(nxt);
-                workspace.flat_lookahead_layers.push_back(nxt);
+        // Przetwarzanie bieżącej głębokości (wyciąganie z kolejki)
+        while (head < layer_end) {
+            int gid = queue[head++];
+            for (int nxt : dag.nodes[gid].next_gates) {
+                if (workspace.visited_epoch[nxt] != workspace.current_bfs_epoch) {
+                    workspace.visited_epoch[nxt] = workspace.current_bfs_epoch;
+                    queue[tail++] = nxt; // Zamiast push_back()
+                }
             }
         }
     }
 
-    // Rejestracja offsetu płaskiego widoku
-    if (!workspace.ext_layer.empty()) {
-        workspace.lookahead_offsets.push_back(workspace.flat_lookahead_layers.size());
-    }
-
-    // Swap to najszybszy sposób na podmianę wektorów bez kopiowania zawartości (zamienia wskaźniki pod spodem)
-    std::swap(workspace.exec_gates, workspace.ext_layer);
-}
-
-inline void SabreDEHybridRouter::build_lookahead_layers() {
-    setup_lookahead_bfs();
-
-    // Iteracyjna budowa warstw w głąb DAG
-    for (size_t depth = 0; depth < max_look_ahead_depth && !workspace.exec_gates.empty(); ++depth) {
-        process_lookahead_layer();
-    }
-
-    // Oczyszczenie buforów pomocniczych na koniec
-    workspace.exec_gates.clear();
-    workspace.ext_layer.clear();
+    // Zapinamy marker końcowy
+    workspace.lookahead_offsets.push_back(tail);
 }
 
 // ==============================================================================
@@ -885,7 +891,7 @@ void SabreDEHybridRouter::force_remaining_qubits_down(DERunContext& ctx, const d
     for (int p = 0; p < p_cnt; ++p) {
         int temp_p = p;
         // Wymuszenie zejścia wszystkich kubitów z rezonatorów na koniec symulacji
-        de_force_down<LOGGING>(temp_p, -1, ctx, genes, n_gates, out_log, false);
+        de_force_down<LOGGING, false>(temp_p, -1, ctx, genes, n_gates, out_log);
     }
 }
 
@@ -1862,69 +1868,102 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
 bool SabreDEHybridRouter::validate_logical_circuit(const std::vector<RoutingRecord>& log) const {
     int n_gates = dag.nodes.size();
 
-    // Mapa tłumacząca oryginalne ID na wewnętrzny indeks DAG-u
+    // 1. Mapowanie oryginalnych ID bramek na indeksy węzłów w DAG
     std::unordered_map<int, int> orig_to_dag;
-    for (int i = 0; i < n_gates; ++i) {
-        if (dag.nodes[i].orig_2q_id != -1) {
-            orig_to_dag[dag.nodes[i].orig_2q_id] = i;
-        }
-    }
-
     std::unordered_map<int, int> orig_1q_to_dag;
     for (int i = 0; i < n_gates; ++i) {
+        if (dag.nodes[i].orig_2q_id != -1) orig_to_dag[dag.nodes[i].orig_2q_id] = i;
         for (int q1_id : dag.nodes[i].q1_1q_ids) orig_1q_to_dag[q1_id] = i;
         for (int q2_id : dag.nodes[i].q2_1q_ids) orig_1q_to_dag[q2_id] = i;
     }
 
+    // LOKALNA PRZYCZYNOWOŚĆ DLA KUBITÓW
+    std::vector<int> prev_node_lq1(n_gates, -1);
+    std::vector<int> prev_node_lq2(n_gates, -1);
+    std::vector<int> last_seen(num_qubits, -1);
+
+    for (int i = 0; i < n_gates; ++i) {
+        if (dag.nodes[i].lq1 != -1) {
+            prev_node_lq1[i] = last_seen[dag.nodes[i].lq1];
+            last_seen[dag.nodes[i].lq1] = i;
+        }
+        if (dag.nodes[i].lq2 != -1) {
+            prev_node_lq2[i] = last_seen[dag.nodes[i].lq2];
+            last_seen[dag.nodes[i].lq2] = i;
+        }
+    }
+
+    std::vector<int> latest_completed_node(num_qubits, -1);
     std::vector<int> executed_count(n_gates, 0);
     std::unordered_set<int> executed_1q_gates;
     std::vector<int> current_deps = dag.initial_deps;
     std::vector<int> l2p = saved_initial_l2p;
 
-    // --- NOWE: Śledzenie czasu gotowości kubitów fizycznych ---
+    // Struktury śledzące czas na obu warstwach sprzętowych
     std::vector<double> qubit_ready_time(topo.qubits.size(), 0.0);
-    const double EPS = 1e-5; // Tolerancja dla błędów zaokrągleń double
+    std::vector<double> resonator_ready_time(topo.resonators.size(), 0.0);
 
+    // --- NOWA STRUKTURA: Śledzenie obecności na rezonatorze ---
+    std::vector<int> val_p_on_res(topo.qubits.size(), -1);
+
+    const double EPS = 1e-5;
     int step = 0;
 
     for (const auto& record : log) {
         step++;
         double op_duration = 0.0;
         std::vector<int> active_qubits;
+        std::vector<int> active_resonators;
 
-        // --- 1. ROZPOZNAWANIE TYPU OPERACJI I WALIDACJA LOGICZNA ---
         if (record.op_type == OpType::SWAP) {
-            op_duration = SWAP_COST; // 3.14
-            int lq1 = record.lq1;
-            int lq2 = record.lq2;
+            op_duration = SWAP_COST;
+            int lq1 = record.lq1, lq2 = record.lq2;
 
-            if (lq1 != -1 && l2p[lq1] != record.loc1) {
-                std::cerr << "Błąd SWAP [Krok " << step << "]: Niezgodność! Kubit logiczny " << lq1
-                          << " jest na loc " << l2p[lq1] << ", a log wskazuje loc " << record.loc1 << "!\n";
-                return false;
-            }
-            if (lq2 != -1 && l2p[lq2] != record.loc2) {
-                std::cerr << "Błąd SWAP [Krok " << step << "]: Niezgodność! Kubit logiczny " << lq2
-                          << " jest na loc " << l2p[lq2] << ", a log wskazuje loc " << record.loc2 << "!\n";
-                return false;
-            }
+            if (lq1 != -1 && l2p[lq1] != record.loc1) return false;
+            if (lq2 != -1 && l2p[lq2] != record.loc2) return false;
 
             if (lq1 != -1) l2p[lq1] = record.loc2;
             if (lq2 != -1) l2p[lq2] = record.loc1;
 
-            if (record.loc1 != -1) active_qubits.push_back(record.loc1);
-            if (record.loc2 != -1) active_qubits.push_back(record.loc2);
+            if (record.loc1 != -1) {
+                active_qubits.push_back(record.loc1);
+                val_p_on_res[record.loc1] = -1; // Gwarancja, że zeszły z rezonatorów
+            }
+            if (record.loc2 != -1) {
+                active_qubits.push_back(record.loc2);
+                val_p_on_res[record.loc2] = -1;
+            }
+            if (record.res_used != -1) active_resonators.push_back(record.res_used);
         }
         else if (record.op_type == OpType::MOVE) {
-            op_duration = MOVE_COST; // 1.0
-            // Ignorujemy tymczasowe wejścia NA rezonator dla logiki l2p
-            if (record.lq1 != -1 && record.loc2 < RES_OFFSET) {
-                l2p[record.lq1] = record.loc2;
-            }
+            op_duration = MOVE_COST;
 
-            // Do analizy czasowej interesują nas tylko fizyczne kubity (nie rezonatory)
-            if (record.loc1 != -1 && record.loc1 < RES_OFFSET) active_qubits.push_back(record.loc1);
-            if (record.loc2 != -1 && record.loc2 < RES_OFFSET) active_qubits.push_back(record.loc2);
+            bool moving_from_res = (record.loc1 >= RES_OFFSET);
+            bool moving_to_res = (record.loc2 >= RES_OFFSET);
+
+            if (moving_to_res) {
+                // Wejście na rezonator
+                int phys_src = record.loc1;
+                int res_dst = record.loc2 - RES_OFFSET;
+
+                if (phys_src != -1) {
+                    active_qubits.push_back(phys_src);
+                    val_p_on_res[phys_src] = res_dst; // Zapamiętanie, gdzie wszedł
+                }
+                active_resonators.push_back(res_dst);
+            }
+            else if (moving_from_res) {
+                // Zejście z rezonatora
+                int res_src = record.loc1 - RES_OFFSET;
+                int phys_dst = record.loc2;
+
+                active_resonators.push_back(res_src);
+                if (phys_dst != -1) {
+                    active_qubits.push_back(phys_dst);
+                    val_p_on_res[phys_dst] = -1; // Zwolnienie flagi obecności
+                }
+                if (record.lq1 != -1) l2p[record.lq1] = phys_dst;
+            }
         }
         else if (record.op_type == OpType::GATE_1Q) {
             op_duration = 1.0;
@@ -1933,40 +1972,60 @@ bool SabreDEHybridRouter::validate_logical_circuit(const std::vector<RoutingReco
             int orig_id = record.gate_id;
 
             if (executed_1q_gates.count(orig_id)) {
-                std::cerr << "Błąd 1Q [Krok " << step << "]: Bramka 1-kubitowa (ID: " << orig_id << ") wykonana ponownie!\n";
+                std::cerr << "Błąd 1Q [Krok " << step << "]: Bramka (ID: " << orig_id << ") wykonana ponownie!\n";
                 return false;
             }
 
-            // --- NOWE: Weryfikacja osi czasu dla bramek 1Q ---
             auto it1q = orig_1q_to_dag.find(orig_id);
             if (it1q != orig_1q_to_dag.end()) {
                 int parent_gid = it1q->second;
 
-                // Sprawdzamy czy poprzednicy (wątek tego kubitu) już się zakończyli
-                // if (current_deps[parent_gid] > 0) {
-                //     std::cerr << "Błąd Przyczynowości [Krok " << step << "]: Bramka 1Q (ID: " << orig_id
-                //               << ") uderzona za wcześnie! Jej węzeł rodzic (DAG: " << parent_gid << ") wciąż ma "
-                //               << current_deps[parent_gid] << " zablokowanych zależności na osi czasu.\n";
-                //     return false;
-                // }
-
-                // Sprawdzamy czy nie wykonujemy jej za późno (po głównej interakcji 2Q)
                 if (executed_count[parent_gid] > 0) {
-                    std::cerr << "Błąd Przyczynowości [Krok " << step << "]: Bramka 1Q (ID: " << orig_id
-                              << ") uderzona za późno! Węzeł główny (DAG: " << parent_gid << ") już się wykonał.\n";
+                    std::cerr << "Błąd Przyczynowości [Krok " << step << "]: Bramka 1Q wykonana za późno!\n";
+                    return false;
+                }
+
+                int expected_prev = (dag.nodes[parent_gid].lq1 == lq1) ? prev_node_lq1[parent_gid] : prev_node_lq2[parent_gid];
+                if (expected_prev != -1 && latest_completed_node[lq1] != expected_prev) {
+                    std::cerr << "Błąd Przyczynowości [Krok " << step << "]: Naruszenie czasu lokalnego!\n";
                     return false;
                 }
             }
 
             executed_1q_gates.insert(orig_id);
 
+            // --- POPRAWKA: Blokada wykonywania 1Q na rezonatorze ---
+            if (p1 >= RES_OFFSET) {
+                std::cerr << "Błąd Sprzętowy 1Q [Krok " << step << "]: Próba wykonania na rezonatorze (" << p1 << ")!\n";
+                return false;
+            }
             if (lq1 != -1 && l2p[lq1] != p1) {
-                std::cerr << "Błąd Mapowania 1Q [Krok " << step << "]: Bramka (ID: " << orig_id
-                          << ") oczekuje kubitu na " << l2p[lq1] << ", ale log odpala ją na " << p1 << "!\n";
+                std::cerr << "Błąd Mapowania 1Q [Krok " << step << "]: Błędna lokalizacja!\n";
+                return false;
+            }
+            if (p1 != -1 && val_p_on_res[p1] != -1) {
+                std::cerr << "Błąd Sprzętowy 1Q [Krok " << step << "]: Kubit fizyczny " << p1
+                          << " musi zejść z rezonatora " << val_p_on_res[p1] << " przed wykonaniem 1Q!\n";
                 return false;
             }
 
-            if (p1 != -1 && p1 < RES_OFFSET) active_qubits.push_back(p1);
+            if (p1 != -1) active_qubits.push_back(p1);
+
+            // Zamykanie wiszącego węzła
+            if (it1q != orig_1q_to_dag.end()) {
+                int parent_gid = it1q->second;
+                const auto& node = dag.nodes[parent_gid];
+                if (node.lq2 == -1) {
+                    bool all_1q_done = true;
+                    for (int q1_id : node.q1_1q_ids) if (!executed_1q_gates.count(q1_id)) all_1q_done = false;
+
+                    if (all_1q_done && executed_count[parent_gid] == 0) {
+                        executed_count[parent_gid]++;
+                        for (int nxt : node.next_gates) current_deps[nxt]--;
+                        latest_completed_node[node.lq1] = parent_gid;
+                    }
+                }
+            }
         }
         else if (record.op_type == OpType::GATE_2Q_LOCAL) {
             op_duration = 1.0;
@@ -1975,88 +2034,80 @@ bool SabreDEHybridRouter::validate_logical_circuit(const std::vector<RoutingReco
 
             int gid = it->second;
 
-            if (executed_count[gid] > 0) {
-                std::cerr << "Błąd Podwójnej Egzekucji [Krok " << step << "]: Bramka DAG ID " << gid << " wykonana ponownie!\n";
-                return false;
-            }
-
-            if (current_deps[gid] > 0) {
-                std::cerr << "Błąd DAG [Krok " << step << "]: Bramka DAG " << gid << " (Oryginał: " << record.gate_id << ")"
-                          << " uderzona za wcześnie! Zostało " << current_deps[gid] << " zablokowanych zależności.\n";
-                return false;
-            }
+            if (executed_count[gid] > 0 || current_deps[gid] > 0) return false;
 
             const auto& node = dag.nodes[gid];
+            bool lq_match = (node.lq1 == record.lq1 && node.lq2 == record.lq2) || (node.lq1 == record.lq2 && node.lq2 == record.lq1);
+            if (!lq_match) return false;
 
-            // --- NOWA WALIDACJA (Uwzględniająca Rezonator w loc1) ---
+            int p1 = l2p[record.lq1];
+            int p2 = l2p[record.lq2];
+            int res = record.loc1 - RES_OFFSET;
 
-            // 1. Sprawdzamy czy para logiczna zgadza się z definicją bramki w DAG-u
-            bool lq_match = false;
-            if (node.lq1 == record.lq1 && node.lq2 == record.lq2) lq_match = true;
-            if (node.lq1 == record.lq2 && node.lq2 == record.lq1) lq_match = true;
+            if (p1 == -1 || p2 == -1) return false;
+            if (record.loc2 != p1 && record.loc2 != p2) return false;
 
-            if (!lq_match) {
-                std::cerr << "Błąd Logiczny [Krok " << step << "]: Bramka " << gid
-                          << " oczekuje kubitów logicznych {" << node.lq1 << ", " << node.lq2
-                          << "}, a otrzymała z logu {" << record.lq1 << ", " << record.lq2 << "}!\n";
+            // --- POPRAWKA: Weryfikacja Topologiczna wybranego Rezonatora ---
+            const auto& p1_res = topo.qubits[p1].connected_resonators;
+            const auto& p2_res = topo.qubits[p2].connected_resonators;
+            bool valid_topology = (std::find(p1_res.begin(), p1_res.end(), res) != p1_res.end()) &&
+                                  (std::find(p2_res.begin(), p2_res.end(), res) != p2_res.end());
+
+            if (!valid_topology) {
+                std::cerr << "Błąd Topologii 2Q [Krok " << step << "]: Rezonator " << res
+                          << " nie łączy kubitów " << p1 << " i " << p2 << "!\n";
                 return false;
             }
 
-            // 2. Sprawdzamy, czy kubit "zostający" (p_stay) faktycznie stoi na dobrej fizycznej pozycji
-            int expected_p_stay = l2p[record.lq2];
-            if (expected_p_stay != record.loc2) {
-                std::cerr << "Błąd Mapowania [Krok " << step << "]: Kubit zostający lq" << record.lq2
-                          << " powinien być na fizycznym " << expected_p_stay
-                          << ", ale log wskazuje " << record.loc2 << "!\n";
+            // --- POPRAWKA: Weryfikacja faktycznego On-boarding'u ---
+            if (val_p_on_res[p1] != res && val_p_on_res[p2] != res) {
+                std::cerr << "Błąd Sprzętowy 2Q [Krok " << step << "]: Żaden z kubitów ("
+                          << p1 << ", " << p2 << ") nie zszedł na rezonator " << res << " przed uderzeniem bramki!\n";
+                return false;
+            }
+            if (val_p_on_res[p1] == res && val_p_on_res[p2] == res) {
+                std::cerr << "Błąd Sprzętowy 2Q [Krok " << step << "]: Kolizja! Oba kubity sprzęgnięte do rezonatora " << res << " naraz!\n";
                 return false;
             }
 
             executed_count[gid]++;
-            for (int nxt : node.next_gates) {
-                current_deps[nxt]--;
-            }
+            for (int nxt : node.next_gates) current_deps[nxt]--;
 
-            // 3. Blokowanie czasowe (Makespan).
-            // Ponieważ record.loc1 to rezonator, musimy odzyskać fizyczną pozycję p_in z naszego mapowania l2p,
-            // aby zapisać, że ten fizyczny kubit na dole również bierze udział w operacji i jest "zamrożony".
-            int actual_p_in = l2p[record.lq1];
+            latest_completed_node[node.lq1] = gid;
+            latest_completed_node[node.lq2] = gid;
 
-            if (actual_p_in != -1 && actual_p_in < RES_OFFSET) active_qubits.push_back(actual_p_in);
-            if (record.loc2 != -1 && record.loc2 < RES_OFFSET) active_qubits.push_back(record.loc2);
+            active_qubits.push_back(p1);
+            active_qubits.push_back(p2);
+            active_resonators.push_back(res);
         }
-        // --- 2. NOWY BLOK: WALIDACJA CZASOWA ---
+
+        // --- WALIDACJA CZASOWA MAKESPAN ---
         for (int q : active_qubits) {
-            // Sprawdzenie kolizji czasowej na fizycznym kubicie
             if (record.start_time < qubit_ready_time[q] - EPS) {
-                std::cerr << "Błąd Czasowy (Makespan) [Krok " << step << "]: Kolizja! "
-                          << "Operacja wymaga fizycznego kubitu " << q << " w czasie " << record.start_time
-                          << ", ale kubit jest wciąż zajęty poprzednią operacją do czasu " << qubit_ready_time[q] << "!\n";
+                std::cerr << "Błąd Czasowy [Krok " << step << "]: Kubit fizyczny " << q << " zderzył się w czasie!\n";
                 return false;
             }
-            // Zablokowanie kubitu na czas trwania operacji
             qubit_ready_time[q] = record.start_time + op_duration;
+        }
+
+        for (int r : active_resonators) {
+            if (record.start_time < resonator_ready_time[r] - EPS) {
+                std::cerr << "Błąd Czasowy [Krok " << step << "]: Rezonator " << r << " zderzył się w czasie!\n";
+                return false;
+            }
+            resonator_ready_time[r] = record.start_time + op_duration;
         }
     }
 
-    // --- 3. KOMPLETNOŚĆ ---
+    // --- KOMPLETNOŚĆ ---
     for (int i = 0; i < n_gates; ++i) {
         const auto& node = dag.nodes[i];
         if (node.lq2 != -1 && executed_count[i] != 1) {
-            std::cerr << "Błąd Kompletności: Główna bramka 2Q (DAG ID: " << i << ") nigdy nie została wykonana!\n";
+            std::cerr << "Błąd Kompletności: Węzeł 2Q (ID DAG: " << i << ") nie został wykonany!\n";
             return false;
         }
-        for (int q1_id : node.q1_1q_ids) {
-            if (!executed_1q_gates.count(q1_id)) {
-                std::cerr << "Błąd Kompletności: Bramka 1Q (ID: " << q1_id << ") nigdy nie została wykonana!\n";
-                return false;
-            }
-        }
-        for (int q2_id : node.q2_1q_ids) {
-            if (!executed_1q_gates.count(q2_id)) {
-                std::cerr << "Błąd Kompletności: Bramka 1Q (ID: " << q2_id << ") nigdy nie została wykonana!\n";
-                return false;
-            }
-        }
+        for (int q1_id : node.q1_1q_ids) if (!executed_1q_gates.count(q1_id)) return false;
+        for (int q2_id : node.q2_1q_ids) if (!executed_1q_gates.count(q2_id)) return false;
     }
 
     return true;

@@ -96,7 +96,8 @@ struct HybridWorkspace {
     std::vector<std::pair<int, int>> flat_lookahead_locs;
     std::vector<int> lookahead_locs_offsets;
     static constexpr int MAX_INTER_PER_Q = 64; // Zapas, którego praktycznie nigdy nie przekroczymy
-    std::vector<QubitInteraction> flat_interactions;
+    std::vector<int> inter_targets;
+    std::vector<double> inter_weights;
     std::vector<int> interaction_counts;
 };
 
@@ -222,8 +223,8 @@ private:
     void force_remaining_qubits_down(DERunContext& ctx, const double* genes, int n_gates, int p_cnt, std::vector<RoutingRecord>* out_log);
     void extract_max_metrics(const DERunContext& ctx, double& max_physical_time, int& max_logical_depth);
 
-    template <bool LOGGING>
-    void de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
+    template <bool LOGGING, bool CAN_LAZY>
+    void de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log);
 
     template <bool LOGGING>
     void de_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& exec_gates, std::vector<int>& front_layer, std::vector<int>& deps, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
