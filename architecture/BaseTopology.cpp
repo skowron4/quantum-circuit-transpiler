@@ -97,6 +97,14 @@ void BaseTopology::print_stats() const {
 
     cout << " - Polaczone z 2 rezonatorami (Wewnetrzne Krawedzie): " << shared_by_2.size() << endl;
     cout << " - Polaczone z 1 rezonatorem (Brzegowe): " << shared_by_1.size() << endl;
+
+    int orphan_qubits = 0;
+    for (const auto& q : qubits) {
+        if (q.connected_resonators.empty()) {
+            cout << "[ALARM] Kubit fizyczny o ID " << q.id << " nie ma ŻADNYCH rezonatorów!" << endl;
+            orphan_qubits++;
+        }
+    }
 }
 
 RoutingPath BaseTopology::calculate_routing_path(int phys_q1, int phys_q2) const {

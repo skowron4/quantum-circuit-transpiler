@@ -1,3 +1,4 @@
+#include <fstream>
 #include <iostream>
 #include "generator/CircuitGenerator.h"
 #include "geneticAlgorithm/toSort/swap_evaluator.hpp"
@@ -6,11 +7,66 @@
 #include "newDESABRE/newSabreDEHybridRouter.h"
 #include "differentialEvolution/differential_evolution.h"
 #include "sabre/SabreRouter.h"
+#include <iomanip> // Potrzebne do formatowania (np. setw)
+#include <nlohmann/json.hpp>
 #ifdef _WIN32
     #include <windows.h>
 #endif
-
+#include <filesystem>
 #include "greedy/GreedyASAP.h"
+
+class CircuitIO {
+public:
+    static std::vector<Gate> load_circuit(const std::string& filename, int& out_num_qubits) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Blad otwarcia pliku: " << filename << "\n";
+            return {};
+        }
+
+        nlohmann::json j; file >> j;
+        out_num_qubits = j["num_qubits"];
+        std::vector<Gate> circuit;
+
+        for (const auto& item : j["gates"]) {
+            Gate g;
+            g.id = item["id"];
+            g.type = item["type"];
+
+            auto qubits = item["qubits"];
+            g.target_q1 = qubits[0];
+            if (qubits.size() > 1) g.target_q2 = qubits[1];
+
+            circuit.push_back(g);
+        }
+        return circuit;
+    }
+
+    static void save_circuit(const std::string& filename, const std::vector<RoutingRecord>& log) {
+        nlohmann::json j;
+        j["gates"] = nlohmann::json::array();
+
+        for (const auto& r : log) {
+            nlohmann::json g_json;
+            if (r.op_type == OpType::SWAP || r.op_type == OpType::MOVE) {
+                g_json["id"] = -1;
+                g_json["type"] = (r.op_type == OpType::SWAP) ? "SWAP" : "MOVE";
+                // ZMIANA TUTAJ: loc1 i loc2 zamiast phys_q1 i phys_q2
+                g_json["qubits"] = {r.loc1, r.loc2};
+            } else {
+                g_json["id"] = r.gate_id;
+                g_json["type"] = (r.op_type == OpType::GATE_1Q) ? "1Q" : "2Q";
+                // ZMIANA TUTAJ: loc1 i loc2
+                if (r.op_type == OpType::GATE_1Q) g_json["qubits"] = {r.loc1};
+                else g_json["qubits"] = {r.loc1, r.loc2};
+            }
+            j["gates"].push_back(g_json);
+        }
+
+        std::ofstream file(filename);
+        if (file.is_open()) file << j.dump(4);
+    }
+};
 
 
 void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
@@ -23,7 +79,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
     // Generowanie obwodu testowego
-    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(50, 0.6, 0.4);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
@@ -41,7 +97,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     sabre.run_benchmark();
 
     // 4. Wykonanie algorytmu DEHybridSabre
-    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, true, 2);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
     SabreDERouter.optimize_windowed(30, 300, 500, 0.7, false, 0.9);
 
     // 5. Wykonanie algorytmu newDEHybridSabre
@@ -49,6 +105,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // newSabreDERouter.optimize_windowed(30, 100, 500, 0.7, true, false, 0.8, 0.9);
 
 }
+
 void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     std::cout << "\n============================================\n";
     std::cout << "URUCHAMIAM TEST DLA TOPOLOGII: " << name << "\n";
@@ -72,10 +129,10 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     results.reserve(NUM_RUNS);
 
     for (int i = 0; i < NUM_RUNS; ++i) {
-        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 4);
+        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
 
         // Odbieramy całą strukturę wyników
-        OptimizationResult res = SabreDERouter.optimize_windowed(30, 200, 500, 0.7,  false, 0.9);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 500, 0.7,  false, 0.9);
         results.push_back(res);
 
         std::cout << "Iteracja " << (i + 1) << " zakonczona. "
@@ -141,14 +198,110 @@ int main() {
     SetConsoleCP(CP_UTF8);
 #endif
     // Topologia siatki 2x2
-    IQMConstellation gridQpu(3, 3);
-    run_test_for_topology(gridQpu, "Siatka 3x3");
+    // IQMConstellation gridQpu(5, 5);
+    // run_test_for_topology(gridQpu, "Siatka 5x5");
     // run_test_for_topologyII(gridQpu, "Siatka 5x5");
 
     // Topologia trójkątna
     IQMTriangleConstellation triangleQpu;
-    // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
+    run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
 
     return 0;
 }
+
+
+// int main(int argc, char* argv[]) {
+//     // Domyślny folder z wygenerowanymi benchmarkami
+//     std::string base_dir = "../iqm_benchmarks";
+//
+//     if (argc >= 2) {
+//         base_dir = argv[1];
+//     }
+//
+//     if (!std::filesystem::exists(base_dir) || !std::filesystem::is_directory(base_dir)) {
+//         std::cerr << "Blad: Katalog '" << base_dir << "' nie istnieje. Najpierw uruchom skrypt Pythona!\n";
+//         return -1;
+//     }
+//
+//     std::cout << "=> Rozpoczynam przetwarzanie plikow w katalogu: " << base_dir << "\n";
+//
+//     // Rekursywna iteracja po wszystkich plikach i podfolderach
+//     for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
+//         if (entry.is_regular_file() && entry.path().extension() == ".json") {
+//
+//             std::string input_file = entry.path().string();
+//
+//             // Zabezpieczenie: pomijamy pliki, które już są wynikiem naszego routingu
+//             if (input_file.find("_routed.json") != std::string::npos) {
+//                 continue;
+//             }
+//
+//             // Tworzymy nazwe pliku wyjsciowego: np. obwod_5q_50g_routed.json
+//             std::string output_file = input_file.substr(0, input_file.find_last_of('.')) + "_routed.json";
+//
+//             std::cout << "\n--------------------------------------------------\n";
+//             std::cout << "=> Wczytywanie: " << input_file << "\n";
+//
+//             int logical_qubits;
+//             std::vector<Gate> circuit = CircuitIO::load_circuit(input_file, logical_qubits);
+//
+//             if(circuit.empty()) {
+//                 std::cerr << "Blad wczytywania obwodu. Pomijam plik.\n";
+//                 continue;
+//             }
+//
+//             // =========================================================
+//             // --- CAP DLA TESTÓW (DO 16 KUBITÓW) ---
+//             // Zakomentuj poniższego if-a, gdy zechcesz odpalić całość
+//             if (logical_qubits < 35 || logical_qubits > 55) {
+//                 std::cout << "=> Pomijam (ma " << logical_qubits << " kubitow, a limit testowy to 16).\n";
+//                 continue; // Skaczemy do następnego pliku w folderze
+//             }
+//             // =========================================================
+//
+//             std::cout << "Bramki: " << circuit.size() << " | Kubity: " << logical_qubits << "\n";
+//
+//             // --- Logika Topologii ---
+//             std::unique_ptr<BaseTopology> topology;
+//             if (logical_qubits <= 13) {
+//                 topology = std::make_unique<IQMTriangleConstellation>();
+//             } else {
+//                 int dim = 2;
+//                 topology = std::make_unique<IQMConstellation>(dim, dim);
+//                 while (topology->get_num_qubits() < logical_qubits) {
+//                     dim++;
+//                     topology = std::make_unique<IQMConstellation>(dim, dim);
+//                 }
+//             }
+//
+//             // --- Konfiguracja Metaheurystyki ---
+//             bool use_slow_mode = false;
+//             int lookahead_depth = 2;
+//
+//             topology->print_stats();
+//
+//             SabreDEHybridRouter router(*topology, circuit, logical_qubits, "qiskit_run", use_slow_mode, lookahead_depth);
+//
+//             int pop_size = 30;
+//             int generations_per_window = 200;
+//             int window_size = 500;
+//             double accept_ratio = 0.7;
+//             bool lazy_offboard = true;
+//
+//             // --- Uruchomienie optymalizacji ---
+//             OptimizationResult result = router.optimize_windowed(pop_size, generations_per_window, window_size, accept_ratio, lazy_offboard);
+//
+//             // --- Zapis wyjścia ---
+//             // Odkomentuj i dostosuj ponizsze linijki zgodnie z Twoim API
+//             // std::vector<Gate> routed_circuit = router.get_routed_circuit();
+//             // CircuitIO::save_circuit(output_file, routed_circuit);
+//
+//             std::cout << "=> Zapisano wynik do: " << output_file << "\n";
+//         }
+//     }
+//
+//     std::cout << "\n==================================================\n";
+//     std::cout << "Zakonczono przetwarzanie wszystkich obwodow z folderu: " << base_dir << "\n";
+//     return 0;
+// }

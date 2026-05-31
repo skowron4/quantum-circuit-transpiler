@@ -17,5 +17,9 @@
   }, {
     "name" : "fmt",
     "version>=" : "12.1.0"
+  }, {
+    "name" : "nlohmann-json"
+  }, {
+    "name" : "boost-container"
   } ]
 }

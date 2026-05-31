@@ -6,6 +6,8 @@
 #define MAGISTERKA_SABREDEHYBRIDROUTER_H
 
 #pragma once
+#include <chrono>
+
 #include "architecture/BaseTopology.h"
 #include "structures/Gate.h"
 #include "structures/routing_record.hpp"
@@ -32,6 +34,7 @@ struct QubitInteraction {
 struct DEStateSnapshot {
     bool is_valid = false;
     int target_gates_routed = 0;
+    int actual_gates_routed = 0;
 
     // Dane z ctx
     std::vector<int> l2p, p2l, q_on_res, res_occ, q_depth;
@@ -50,7 +53,15 @@ struct HybridGateNode {
     int lq1, lq2;
     int q1_1q_count, q2_1q_count;
     int deps_count = 0;
+    std::vector<int> q1_1q_ids;
+    std::vector<int> q2_1q_ids;
+    int orig_2q_id;
     std::vector<int> next_gates;
+
+    HybridGateNode(int _id, int _lq1, int _lq2, int _q1_cnt, int _q2_cnt,
+                   std::vector<int> _q1_ids, std::vector<int> _q2_ids, int _orig_2q)
+        : id(_id), lq1(_lq1), lq2(_lq2), q1_1q_count(_q1_cnt), q2_1q_count(_q2_cnt),
+          q1_1q_ids(std::move(_q1_ids)), q2_1q_ids(std::move(_q2_ids)), orig_2q_id(_orig_2q), deps_count(0) {}
 };
 
 struct HybridSabreDAG {
@@ -158,18 +169,36 @@ private:
     int get_distance_old(int p1, int p2) const;
     int get_distance(int p1, int p2) const;
     HybridSabreDAG build_dag(const std::vector<Gate>& circuit) const;
+    void add_2q_node_to_dag(HybridSabreDAG& local_dag, const Gate& g, std::vector<std::vector<int>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
+    void flush_trailing_1q_nodes(HybridSabreDAG& local_dag, std::vector<std::vector<int>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
+    void compute_initial_deps(HybridSabreDAG& local_dag) const;
 
     // --- Metody Pomocnicze SABRE ---
     std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, std::vector<int>* out_logical_order);
     void sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx);
     void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, std::vector<int>* out_logical_order);
     bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
+    inline void sabre_execute_1q_gate(const HybridGateNode& node, int p1, SabreRunContext& ctx);
+    inline void sabre_execute_2q_gate(const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx);
+    inline void extract_sabre_executables(const HybridSabreDAG& current_dag, std::vector<int>& front_layer, std::vector<int>& executable_gates, SabreRunContext& ctx);
+    inline void build_sabre_lookahead(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, std::vector<std::vector<int>>& lookahead_layers, std::vector<bool>& in_extended);
 
     // --- Metody Pomocnicze do ewaluacji (wydzielone z evaluate_fitness_impl) ---
     void reset_evaluation_state(DERunContext& ctx, std::vector<RoutingRecord>* out_log);
     void init_front_layer(int n_gates);
     void extract_executable_gates(DERunContext& ctx);
     void build_lookahead_layers();
+    // Nowe metody pomocnicze do resetowania stanu
+    inline void reset_mappings(DERunContext& ctx);
+    inline void reset_hardware_states(DERunContext& ctx);
+    // Nowe metody pomocnicze do inicjalizacji front_layer
+    inline void load_initial_dependencies();
+    inline void populate_initial_front_layer(int n_gates);
+    // Nowa metoda pomocnicza do sprawdzania gotowości bramki
+    inline bool check_execution_ready(const HybridGateNode& node, const DERunContext& ctx) const;
+    // Nowe metody pomocnicze do BFS (Lookahead)
+    inline void setup_lookahead_bfs();
+    inline void process_lookahead_layer();
 
     // --- Metody Pomocnicze DE ---
     template <bool LOGGING>
@@ -188,6 +217,10 @@ private:
 
     std::vector<int> prepare_sabre_seed();
     void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);
+    double calculate_fitness_score(double routing_cost, int swaps, double max_time, int max_depth);
+    template <bool LOGGING>
+    void force_remaining_qubits_down(DERunContext& ctx, const double* genes, int n_gates, int p_cnt, std::vector<RoutingRecord>* out_log);
+    void extract_max_metrics(const DERunContext& ctx, double& max_physical_time, int& max_logical_depth);
 
     template <bool LOGGING>
     void de_force_down(int& p, int gate_id, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
@@ -212,12 +245,27 @@ private:
         const double* genes, int n_gates,
         std::vector<RoutingRecord>* out_log);
 
+    inline int de_select_lazy_target(int p, int r, int gate_id, const DERunContext& ctx, const double* genes, int n_gates) const;
+
+    template <bool LOGGING>
+    void de_execute_1q_logic(const HybridGateNode& node, int p1, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
+    template <bool LOGGING>
+    bool de_execute_2q_logic(const HybridGateNode& node, int p1, int p2, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
+    inline void de_update_dependencies(const HybridGateNode& node, std::vector<int>& front_layer, std::vector<int>& deps);
+    inline void de_collect_active_qubits(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, DERunContext& ctx);
+    template <bool LOGGING>
+    void de_execute_route_candidate(int p1, int p2, int r_step, DERunContext& ctx, std::vector<double>& decay, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
+
     template <bool LOGGING>
     double evaluate_fitness_impl(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard, DEStateSnapshot* load_snapshot = nullptr, DEStateSnapshot* save_snapshot = nullptr);
     double evaluate_fitness(const double* genes, int& out_swaps, int& out_moves, double& max_physical_time, int& max_logical_depth, std::vector<RoutingRecord>* out_log, bool can_lazy_offboard);
 
-    void run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end, DEStateSnapshot* snapshot);
-    void generate_trial_vector_windowed(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end);
+    void run_evolution_loop_windowed(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end, DEStateSnapshot* snapshot, const std::vector<int>& gate_time_map);
+    void generate_trial_vector_windowed(const std::vector<double>& pop, std::vector<double>& trial, int current_idx, int a, int b, int c, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, int w_start, int w_end, const std::vector<int>& gate_time_map, DEStateSnapshot* snapshot);
+
+    inline void load_state_from_snapshot(DERunContext& ctx, const DEStateSnapshot* load_snapshot, int& gates_routed, std::vector<RoutingRecord>* out_log);
+    inline void save_state_to_snapshot(const DERunContext& ctx, DEStateSnapshot* save_snapshot, int gates_routed);
+    inline void select_distinct_parents(int pop_size, int current_idx, int& a, int& b, int& c, boost::random::xoshiro256pp& rng);
 
     // --- Narzędzia ---
     void print_statistics(double best_score, double physical_time, int depth, int sw, int mv, double exec_time);
@@ -225,11 +273,22 @@ private:
     void export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::string& filename);
     bool validate_logical_circuit(const std::vector<RoutingRecord>& log) const;
 
+    // --- Metody pomocnicze do konstruktora ---
+    void init_distance_cache();
+    void precompute_physical_swaps();
+    void allocate_workspace(int g_cnt);
+    // --- Metody pomocnicze do głównej pętli DE ---
+    void run_standard_evolution_loop(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int generations, int n_genes, int n_gates, double f, double cr, boost::random::xoshiro256pp& rng, bool can_lazy);
+    // --- Metody pomocnicze do Windowed DE ---
+    void propagate_window_success(std::vector<double>& pop, std::vector<double>& fitness, int pop_size, int n_genes, int n_gates, int blocks, int best_idx, int accept_end, const std::vector<int>& gate_time_map, DEStateSnapshot& current_snapshot, bool can_lazy);
+    // --- Finalizacja i logowanie ---
+    OptimizationResult finalize_optimization_result(const std::vector<double>& pop, int best_idx, int n_genes, bool can_lazy, std::chrono::time_point<std::chrono::high_resolution_clock> start_time);
+
 public:
     SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow = false, int max_look_ahead_depth = 1);
 
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
-    OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
+    OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.9, double cr = 0.9);
 };
 
 #endif //MAGISTERKA_SABREDEHYBRIDROUTER_H
