@@ -4,6 +4,8 @@
 
 #include "SabreRouter.h"
 
+#include "dEHybridSabre/SabreDEHybridRouter.h"
+
 SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name)
     : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)) {
 
@@ -106,12 +108,60 @@ SabreDAG SabreRouter::build_dag(const std::vector<Gate>& circuit) const {
 }
 
 void SabreRouter::force_qubit_down(int p, int current_gate_id, MachineState& state, std::vector<int>& q_logical_depth,
-                                   std::vector<RoutingRecord>& log, int& out_moves, double& total_routing_cost, bool is_final) const {
-    // ... Wnętrze funkcji (pozostawione bez zmian) ...
+                                   std::vector<RoutingRecord>& log, int& out_moves, double& total_routing_cost, bool is_final,
+                                   bool allow_relocation, const SabreDAG* current_dag, const std::vector<int>* front_layer) const {
     if (state.q_on_resonator[p] != -1) {
         int r = state.q_on_resonator[p];
-        double step_start = fast_max_sabre(state.q_ready_time[p], state.r_ready_time[r]);
         int lq = state.phys_qubit_to_logical[p];
+
+        int best_target_p = p; // Domyślnie zrzucamy na oryginalny fizyczny adres
+
+        // ZMIANA 3: Szukamy lepszego (pustego) miejsca dla kubitu, by skrócić dystans
+        if (allow_relocation && current_dag && front_layer && !front_layer->empty()) {
+            int target_phys_q = -1;
+
+            // Sprawdzamy, gdzie ten logiczny kubit będzie zaraz potrzebny
+            for (int gid : *front_layer) {
+                const auto& node = current_dag->nodes[gid];
+                if (node.lq1 == lq && node.lq2 != -1) { target_phys_q = state.logical_to_phys_qubit[node.lq2]; break; }
+                if (node.lq2 == lq && node.lq1 != -1) { target_phys_q = state.logical_to_phys_qubit[node.lq1]; break; }
+            }
+
+            // Jeśli kubit ma partnera w tej warstwie, sprawdzamy otoczenie rezonatora
+            if (target_phys_q != -1) {
+                int min_dist = get_distance(p, target_phys_q);
+
+                for (int candidate_p : topo.resonators[r].connected_qubits) {
+                    // Warunek: sąsiad podłączony do tego samego rezonatora MUSI być pusty
+                    if (candidate_p != p && state.phys_qubit_to_logical[candidate_p] == -1) {
+                        int dist = get_distance(candidate_p, target_phys_q);
+                        if (dist < min_dist) {
+                            min_dist = dist;
+                            best_target_p = candidate_p;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Bezpieczna migracja stanu, jeśli algorytm wybrał zmianę adresu ---
+        if (best_target_p != p) {
+            state.phys_qubit_to_logical[p] = -1;
+            state.q_on_resonator[p] = -1;
+
+            state.phys_qubit_to_logical[best_target_p] = lq;
+            state.logical_to_phys_qubit[lq] = best_target_p;
+
+            // Kopiujemy stany gotowości czasu i głębokości na nowy "dom"
+            state.q_ready_time[best_target_p] = state.q_ready_time[p];
+            q_logical_depth[best_target_p] = q_logical_depth[p];
+
+            // Od tego momentu reszta funkcji operuje na nowym adresie
+            p = best_target_p;
+        }
+
+        // --- Standardowe opuszczenie rezonatora ---
+        double step_start = fast_max_sabre(state.q_ready_time[p], state.r_ready_time[r]);
 
         if (is_final) log.push_back({OpType::MOVE, current_gate_id, lq, -1, r + RES_OFFSET, p, -1, step_start});
 
@@ -120,6 +170,7 @@ void SabreRouter::force_qubit_down(int p, int current_gate_id, MachineState& sta
         state.q_ready_time[p] = step_start + MOVE_COST;
         state.r_ready_time[r] = step_start + MOVE_COST;
         q_logical_depth[p] += 1;
+
         state.q_on_resonator[p] = -1;
         state.res_occupant[r] = -1;
     }
@@ -159,11 +210,26 @@ void SabreRouter::process_executable_gates(const SabreDAG& current_dag, const st
             q_logical_depth[p2] += node.q2_1q_count;
 
             int chosen_res = -1;
+            double best_res_score = std::numeric_limits<double>::max();
+
             const auto& p2_res = topo.qubits[p2].connected_resonators;
             for (int r : topo.qubits[p1].connected_resonators) {
                 if (std::ranges::find(p2_res, r) != p2_res.end()) {
-                    chosen_res = r;
-                    break;
+                    double current_score = 0.0;
+
+                    // PRIORYTET 1: Unikamy zrzucania obcych kubitów (oszczędzamy MOVE)
+                    // Jeśli rezonator jest zajęty przez kubit inny niż p1 i p2, nakładamy ogromną karę
+                    if (state.res_occupant[r] != -1 && state.res_occupant[r] != p1 && state.res_occupant[r] != p2) {
+                        current_score += 10000.0;
+                    }
+
+                    // PRIORYTET 2: Tie-breaker czasowy (Makespan)
+                    current_score += state.r_ready_time[r];
+
+                    if (current_score < best_res_score) {
+                        best_res_score = current_score;
+                        chosen_res = r;
+                    }
                 }
             }
 
@@ -176,13 +242,22 @@ void SabreRouter::process_executable_gates(const SabreDAG& current_dag, const st
                 int lq_in = q1_goes_in ? node.lq1 : node.lq2;
                 int lq_stay = q1_goes_in ? node.lq2 : node.lq1;
 
-                force_qubit_down(p_stay, node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final);
+                // Zrzucamy p_stay włączając inteligentną relokację (true)
+                force_qubit_down(p_stay, node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final, true, &current_dag, &front_layer);
+                p_stay = state.logical_to_phys_qubit[lq_stay]; // <- MUSISZ TO DODAĆ (odświeżenie)
+
+                // Jeśli na docelowym rezonatorze jest inny, obcy kubit, zrzucamy go
                 if (state.res_occupant[chosen_res] != -1 && state.res_occupant[chosen_res] != p_in) {
-                    force_qubit_down(state.res_occupant[chosen_res], node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final);
+                    int alien_p = state.res_occupant[chosen_res];
+                    force_qubit_down(alien_p, node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final, true, &current_dag, &front_layer);
                 }
 
                 if (state.q_on_resonator[p_in] != chosen_res) {
-                    force_qubit_down(p_in, node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final);
+                    // Zrzucamy p_in, jeśli przebywa na innym rezonatorze
+                    force_qubit_down(p_in, node.id, state, q_logical_depth, log, out_moves, total_routing_cost, is_final, true, &current_dag, &front_layer);
+                    p_in = state.logical_to_phys_qubit[lq_in]; // <- MUSISZ TO DODAĆ (odświeżenie)
+
+                    // ... reszta kodu do obliczania start_time bez zmian ...
                     start_time = fast_max_sabre(state.q_ready_time[p_in], fast_max_sabre(state.q_ready_time[p_stay], state.r_ready_time[chosen_res]));
                     if (is_final) log.push_back({OpType::MOVE, node.id, lq_in, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
 
@@ -354,8 +429,23 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
             double f_norm_new = front_pairs.empty() ? 0 : ((base_score_F + delta_F) / front_pairs.size());
             double e_norm_new = ext_pairs.empty() ? 0 : ((base_score_E + delta_E) / total_e_weight);
 
-            // Klasyczna heurystyka SABRE uwzględniająca decay kubitów fizycznych (karanie "ping-ponga")
-            double score = (f_norm_new + EXTENDED_LAYER_WEIGHT * e_norm_new) * fast_max_sabre(decay[u], decay[v]);
+            // Baza dystansu (im mniejsza, tym lepszy wynik heurystyki)
+            double dist_score = (f_norm_new + EXTENDED_LAYER_WEIGHT * e_norm_new);
+
+            // ZMIANA 2: Faworyzowanie operacji MOVE nad SWAP
+            // Rozpoznajemy, czy ruch na tej krawędzi to de facto MOVE (transfer na pusty kubit)
+            bool is_move = (lq_p == -1 || lq_neighbor == -1);
+
+            // Wymuszamy, by algorytm wolał "tani" MOVE. Jeśli to kosztowny SWAP,
+            // sztucznie pogarszamy jego wynik, mnożąc go przez karę operacyjną.
+            double op_penalty = is_move ? 1.0 : (SWAP_COST / (2.0 * MOVE_COST));
+
+            // Finalny wynik bazujący na odległości, karze za typ operacji i karze za częstotliwość (decay)
+            double score = dist_score * op_penalty * fast_max_sabre(decay[u], decay[v]);
+
+            // Drobny tie-breaker dla zdarzeń o identycznym wyniku (wybiera szybsze wykonanie w czasie)
+            double time_tie_breaker = 0.0001 * fast_max_sabre(state.q_ready_time[u], state.q_ready_time[v]);
+            score += time_tie_breaker;
 
             if (score < best_candidate.score) {
                 best_candidate = {u, v, r, score};
@@ -502,7 +592,9 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
 
         if (!executable_gates.empty()) {
             process_executable_gates(current_dag, executable_gates, state, q_logical_depth, log, out_moves, total_routing_cost, is_final, gates_routed, deps, front_layer);
-            std::fill(decay.begin(), decay.end(), DECAY_RESET);
+            for (double& d : decay) {
+                d = fast_max_sabre(DECAY_RESET, d - DECAY_INCREMENT); // Kubity stygną stopniowo
+            }
             continue;
         }
 
@@ -749,3 +841,4 @@ void SabreRouter::print_optimized_circuit(const std::vector<RoutingRecord>& log,
     for (int i = 0; i < n_q; ++i) { std::cout << lines_q[i].str() << "\n"; }
     std::cout << "=====================================================\n\n";
 }
+

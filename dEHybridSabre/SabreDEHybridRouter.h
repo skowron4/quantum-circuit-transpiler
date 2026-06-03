@@ -53,15 +53,30 @@ struct HybridGateNode {
     int lq1, lq2;
     int q1_1q_count, q2_1q_count;
     int deps_count = 0;
-    std::vector<int> q1_1q_ids;
-    std::vector<int> q2_1q_ids;
+    absl::InlinedVector<int, 4> q1_1q_ids;
+    absl::InlinedVector<int, 4> q2_1q_ids;
     int orig_2q_id;
-    std::vector<int> next_gates;
+    // std::vector<int> next_gates;
 
-    HybridGateNode(int _id, int _lq1, int _lq2, int _q1_cnt, int _q2_cnt,
-                   std::vector<int> _q1_ids, std::vector<int> _q2_ids, int _orig_2q)
-        : id(_id), lq1(_lq1), lq2(_lq2), q1_1q_count(_q1_cnt), q2_1q_count(_q2_cnt),
-          q1_1q_ids(std::move(_q1_ids)), q2_1q_ids(std::move(_q2_ids)), orig_2q_id(_orig_2q), deps_count(0) {}
+    // 2. MAGIA: Podmieniamy std::vector.
+    // Liczba '2' oznacza, że jeśli bramka ma 1 lub 2 następników (co w obwodach kwantowych jest regułą),
+    // pamięć NIE zostanie zaalokowana na stercie, tylko "wklejona" w samą strukturę.
+    absl::InlinedVector<int, 2> next_gates;
+
+    HybridGateNode(int id, int lq1, int lq2, int q1_cnt, int q2_cnt,
+                   absl::InlinedVector<int, 4> q1_ids,
+                   absl::InlinedVector<int, 4> q2_ids,
+                   int orig_2q)
+        // POPRAWKA 2: Kolejność na liście inicjalizacyjnej idealnie zgadza się z deklaracjami
+        : id(id),
+          lq1(lq1),
+          lq2(lq2),
+          q1_1q_count(q1_cnt),
+          q2_1q_count(q2_cnt),
+          // deps_count pomijamy, bo ma domyślną wartość 0 w samej deklaracji
+          q1_1q_ids(std::move(q1_ids)),
+          q2_1q_ids(std::move(q2_ids)),
+          orig_2q_id(orig_2q) {}
 };
 
 struct HybridSabreDAG {
@@ -72,7 +87,7 @@ struct HybridSabreDAG {
 // Zoptymalizowany HybridWorkspace (Usunięto SwapCand, dodano flagi O(1) i pre-alokowane pary)
 struct HybridWorkspace {
     std::vector<int> l2p, p2l, q_on_res, res_occ, q_depth, deps, ready_queue, shared_res;
-    std::vector<double> q_time, r_time;
+    std::vector<double> q_time, r_time, phys_gene_weights;;
 
     // Zbuforowane kontenery
     std::vector<int> front_layer, exec_gates, ext_layer;
@@ -154,6 +169,7 @@ private:
     int num_qubits;
     std::string name;
     int max_look_ahead_depth;
+    int p_cnt_cache;
 
     bool slow;
 
@@ -170,8 +186,8 @@ private:
     int get_distance_old(int p1, int p2) const;
     int get_distance(int p1, int p2) const;
     HybridSabreDAG build_dag(const std::vector<Gate>& circuit) const;
-    void add_2q_node_to_dag(HybridSabreDAG& local_dag, const Gate& g, std::vector<std::vector<int>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
-    void flush_trailing_1q_nodes(HybridSabreDAG& local_dag, std::vector<std::vector<int>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
+    void add_2q_node_to_dag(HybridSabreDAG& local_dag, const Gate& g, std::vector<absl::InlinedVector<int, 4>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
+    void flush_trailing_1q_nodes(HybridSabreDAG& local_dag, std::vector<absl::InlinedVector<int, 4>>& pending_1q, std::vector<int>& last_gate, int& group_id) const;
     void compute_initial_deps(HybridSabreDAG& local_dag) const;
 
     // --- Metody Pomocnicze SABRE ---
@@ -253,7 +269,7 @@ private:
     template <bool LOGGING>
     bool de_execute_2q_logic(const HybridGateNode& node, int p1, int p2, DERunContext& ctx, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
     inline void de_update_dependencies(const HybridGateNode& node, std::vector<int>& front_layer, std::vector<int>& deps);
-    inline void de_collect_active_qubits(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, DERunContext& ctx);
+    void de_collect_active_qubits(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, DERunContext& ctx);
     template <bool LOGGING>
     void de_execute_route_candidate(int p1, int p2, int r_step, DERunContext& ctx, std::vector<double>& decay, const double* genes, int n_gates, std::vector<RoutingRecord>* out_log, bool can_lazy);
 
@@ -290,6 +306,7 @@ public:
 
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
     OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.9, double cr = 0.9);
+    OptimizationResult evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit);
 };
 
 #endif //MAGISTERKA_SABREDEHYBRIDROUTER_H

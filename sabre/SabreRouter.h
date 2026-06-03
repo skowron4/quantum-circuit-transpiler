@@ -71,7 +71,8 @@ private:
     void print_optimized_circuit(const std::vector<RoutingRecord>& log, int num_logical_qubits) const;
 
     void force_qubit_down(int p, int current_gate_id, MachineState& state, std::vector<int>& q_logical_depth,
-                          std::vector<RoutingRecord>& log, int& out_moves, double& total_routing_cost, bool is_final) const;
+                      std::vector<RoutingRecord>& log, int& out_moves, double& total_routing_cost, bool is_final,
+                      bool allow_relocation = false, const SabreDAG* current_dag = nullptr, const std::vector<int>* front_layer = nullptr) const;
 
     void process_executable_gates(const SabreDAG& current_dag, const std::vector<int>& executable_gates,
                                   MachineState& state, std::vector<int>& q_logical_depth, std::vector<RoutingRecord>& log,

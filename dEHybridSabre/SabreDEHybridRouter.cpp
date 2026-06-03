@@ -23,7 +23,7 @@ SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std
     std::vector<Gate> reversed_circuit = original_circuit;
     std::reverse(reversed_circuit.begin(), reversed_circuit.end());
     reversed_dag = build_dag(reversed_circuit);
-
+    p_cnt_cache = topo.qubits.size();
     precompute_physical_swaps();
     allocate_workspace(dag.nodes.size());
 }
@@ -104,6 +104,8 @@ inline void SabreDEHybridRouter::allocate_workspace(int g_cnt) {
 
     workspace.flat_lookahead_layers.reserve(g_cnt);
     workspace.flat_lookahead_locs.reserve(g_cnt);
+
+    workspace.phys_gene_weights.resize(p_cnt, 0.0);
 }
 
 // ==============================================================================
@@ -134,7 +136,7 @@ int SabreDEHybridRouter::get_distance_old(int p1, int p2) const {
 }
 
 int SabreDEHybridRouter::get_distance(int p1, int p2) const {
-    return dist_cache[p1 * topo.qubits.size() + p2];
+    return dist_cache[p1 * p_cnt_cache + p2];
 }
 
 // ==============================================================================
@@ -147,7 +149,7 @@ HybridSabreDAG SabreDEHybridRouter::build_dag(const std::vector<Gate>& circuit) 
     local_dag.nodes.reserve(circuit.size());
 
     std::vector<int> last_gate(num_qubits, -1);
-    std::vector<std::vector<int>> pending_1q(num_qubits);
+    std::vector<absl::InlinedVector<int, 4>> pending_1q(num_qubits);
     int group_id = 0;
 
     for (const auto& g : circuit) {
@@ -170,7 +172,7 @@ HybridSabreDAG SabreDEHybridRouter::build_dag(const std::vector<Gate>& circuit) 
 inline void SabreDEHybridRouter::add_2q_node_to_dag(
     HybridSabreDAG& local_dag,
     const Gate& g,
-    std::vector<std::vector<int>>& pending_1q,
+    std::vector<absl::InlinedVector<int, 4>>& pending_1q,
     std::vector<int>& last_gate,
     int& group_id) const
 {
@@ -205,7 +207,7 @@ inline void SabreDEHybridRouter::add_2q_node_to_dag(
 
 inline void SabreDEHybridRouter::flush_trailing_1q_nodes(
     HybridSabreDAG& local_dag,
-    std::vector<std::vector<int>>& pending_1q,
+    std::vector<absl::InlinedVector<int, 4>>& pending_1q,
     std::vector<int>& last_gate,
     int& group_id) const
 {
@@ -214,7 +216,7 @@ inline void SabreDEHybridRouter::flush_trailing_1q_nodes(
             HybridGateNode node(
                 group_id++, i, -1,
                 pending_1q[i].size(), 0,
-                pending_1q[i], std::vector<int>{}, -1
+                pending_1q[i], {}, -1 // <--- ZMIANA: używamy {} zamiast std::vector<int>{}
             );
 
             if (last_gate[i] != -1) {
@@ -225,8 +227,6 @@ inline void SabreDEHybridRouter::flush_trailing_1q_nodes(
             local_dag.nodes.push_back(std::move(node));
             last_gate[i] = local_dag.nodes.back().id;
 
-            // Tutaj clear() nie jest już wymagany ze względów wydajnościowych (bo to koniec analizy),
-            // ale zostawiamy dla spójności stanu
             pending_1q[i].clear();
         }
     }
@@ -428,7 +428,7 @@ void SabreDEHybridRouter::de_execute_gates(const HybridSabreDAG& current_dag, st
 // KROK ROUTINGU (de_route_step)
 // Szuka najlepszego ruchu (SWAP/MOVE), gdy bramki są zablokowane.
 // ==============================================================================
-inline void SabreDEHybridRouter::de_collect_active_qubits(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, DERunContext& ctx) {
+void SabreDEHybridRouter::de_collect_active_qubits(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, DERunContext& ctx) {
     std::fill(ctx.ws.in_active.begin(), ctx.ws.in_active.end(), 0);
     ctx.ws.active_phys.clear();
 
@@ -620,8 +620,9 @@ bool SabreDEHybridRouter::de_route_step(
                 delta += ctx.ws.inter_weights[off_v + k] * (dist_u[target] - dist_v[target]) * (target != u);
             }
 
+            // Wewnątrz najgłębszej pętli poszukiwania u i v
             double score = (base_total_score + delta) * fast_max_hyb(decay[u], decay[v]);
-            score *= (0.95 + (genes[u % n_gates] * 0.1));
+            score *= ctx.ws.phys_gene_weights[u]; // Błyskawiczny odczyt!
 
             if (score < best_score) {
                 best_score = score;
@@ -998,6 +999,10 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
     } else {
         reset_evaluation_state(ctx, out_log);
         init_front_layer(n_gates);
+    }
+
+    for (int i = 0; i < p_cnt; ++i) {
+        ctx.ws.phys_gene_weights[i] = 0.95 + (genes[i % n_gates] * 0.1);
     }
 
     // --- GŁÓWNA PĘTLA SYMULACJI ---
@@ -1557,7 +1562,7 @@ bool SabreDEHybridRouter::sabre_route_step(
 {
     int p_cnt = topo.qubits.size();
 
-    std::vector<bool> in_active(p_cnt, false);
+    std::vector<uint8_t> in_active(p_cnt, 0);
     std::vector<int> active_phys_qubits;
     active_phys_qubits.reserve(num_qubits);
 
@@ -1590,7 +1595,7 @@ bool SabreDEHybridRouter::sabre_route_step(
     struct SwapCandidate { int p1, p2, r_shared; double score; };
 
     // [OPTYMALIZACJA] O(1) dla weryfikacji powielonych krawędzi
-    std::vector<bool> seen_edges(p_cnt * p_cnt, false);
+    std::vector<uint8_t> seen_edges(p_cnt * p_cnt, 0);
 
     // [OPTYMALIZACJA] Zamiast składować wszystko do wektora, wyznaczamy zwycięzcę w locie
     double best_score = std::numeric_limits<double>::max();
@@ -2309,4 +2314,159 @@ void SabreDEHybridRouter::export_moves_to_file(const std::vector<RoutingRecord>&
         out << time_step << "," << to_string(move.op_type) << "," << move.gate_id << "," << move.lq1 << "," << move.lq2 << "," << move.loc1 << "," << move.loc2 << "," << move.res_used << "\n";
     }
     std::cout << ">>> Zapisano harmonogram (Hybryda 3.0) do: " << filename << "\n";
+}
+
+OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit) {
+    int p_cnt = topo.qubits.size();
+    int r_cnt = topo.resonators.size();
+
+    // Rejestry stanu maszyny fizycznej (czyste, bo Qiskit operuje na ID fizycznych)
+    std::vector<int> q_on_res(p_cnt, -1);
+    std::vector<int> res_occ(r_cnt, -1);
+    std::vector<double> q_time(p_cnt, 0.0);
+    std::vector<double> r_time(r_cnt, 0.0);
+    std::vector<int> q_depth(p_cnt, 0);
+
+    int out_swaps = 0;
+    int out_moves = 0;
+    double total_routing_cost = 0.0;
+    std::vector<RoutingRecord> final_log;
+
+    // Lambda: Wymuszenie zejścia fizycznego kubitu z rezonatora (Automatyczny MOVE)
+    auto force_down = [&](int p) {
+        int r = q_on_res[p];
+        if (r == -1) return;
+
+        double start = fast_max_hyb(q_time[p], r_time[r]);
+        final_log.push_back({OpType::MOVE, -1, -1, -1, r + RES_OFFSET, p, -1, start});
+
+        out_moves++;
+        total_routing_cost += MOVE_COST;
+
+        q_time[p] = start + MOVE_COST;
+        r_time[r] = start + MOVE_COST;
+        q_depth[p]++;
+        q_on_res[p] = -1;
+        res_occ[r] = -1;
+    };
+
+    // PĘTLA SYMULACJI LINII CZASOWEJ
+    for (const auto& g : qiskit_circuit) {
+        // --- BRAMKA 1-KUBITOWA ---
+        if (g.type == "1Q") {
+            int p1 = g.target_q1;
+            force_down(p1); // Musi zejść na węzeł, żeby wykonać 1Q
+
+            final_log.push_back({OpType::GATE_1Q, g.id, -1, -1, p1, -1, -1, q_time[p1]});
+            q_time[p1] += 1.0;
+            q_depth[p1]++;
+        }
+        // --- BRAMKA 2-KUBITOWA (CX) ---
+        else if (g.type == "2Q") {
+            int p1 = g.target_q1;
+            int p2 = g.target_q2;
+
+            // Szukamy wspólnego rezonatora sprzętowego
+            int chosen_res = -1;
+            for (int r : topo.qubits[p1].connected_resonators) {
+                const auto& p2_res = topo.qubits[p2].connected_resonators;
+                if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
+                    chosen_res = r; break;
+                }
+            }
+
+            if (chosen_res == -1) {
+                std::cerr << "[BŁĄD WALIDACJI QISKITA] Próba wykonania 2Q na niesąsiadujących kubitach: " << p1 << " i " << p2 << "\n";
+                continue;
+            }
+
+            // Decyzja czasowa - kto wchodzi, kto czeka na zewnątrz
+            bool q1_goes_in = (q_time[p1] <= q_time[p2]);
+            int p_in = q1_goes_in ? p1 : p2;
+            int p_stay = q1_goes_in ? p2 : p1;
+
+            force_down(p_stay);
+            if (res_occ[chosen_res] != -1 && res_occ[chosen_res] != p_in) {
+                force_down(res_occ[chosen_res]);
+            }
+
+            double start_time;
+            if (q_on_res[p_in] != chosen_res) {
+                force_down(p_in);
+                start_time = fast_max_hyb(q_time[p_in], fast_max_hyb(q_time[p_stay], r_time[chosen_res]));
+
+                final_log.push_back({OpType::MOVE, g.id, -1, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
+                out_moves++;
+                total_routing_cost += MOVE_COST;
+                start_time += MOVE_COST;
+
+                q_on_res[p_in] = chosen_res;
+                res_occ[chosen_res] = p_in;
+                q_depth[p_in]++;
+            } else {
+                start_time = fast_max_hyb(q_time[p_in], fast_max_hyb(q_time[p_stay], r_time[chosen_res]));
+            }
+
+            final_log.push_back({OpType::GATE_2Q_LOCAL, g.id, -1, -1, chosen_res + RES_OFFSET, p_stay, -1, start_time});
+            q_time[p_in] = q_time[p_stay] = r_time[chosen_res] = start_time + 1.0;
+
+            int max_d = fast_max_hyb(q_depth[p_in], q_depth[p_stay]);
+            q_depth[p_in] = q_depth[p_stay] = max_d + 1;
+        }
+        // --- ABSTRACT SWAP (Wstawiony przez Qiskit SABRE) ---
+        else if (g.type == "SWAP") {
+            int p1 = g.target_q1;
+            int p2 = g.target_q2;
+
+            int chosen_res = -1;
+            for (int r : topo.qubits[p1].connected_resonators) {
+                const auto& p2_res = topo.qubits[p2].connected_resonators;
+                if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
+                    chosen_res = r; break;
+                }
+            }
+
+            // Wykonujemy fizyczny SWAP na architekturze magistrali rezonatorowej
+            force_down(p1);
+            force_down(p2);
+            if (chosen_res != -1 && res_occ[chosen_res] != -1) force_down(res_occ[chosen_res]);
+
+            // Dodatkowe zabezpieczenie: jeśli nie połączone rezonatorem, start time max dla kubitów
+            double r_time_val = (chosen_res != -1) ? r_time[chosen_res] : 0.0;
+            double start_time = fast_max_hyb(q_time[p1], fast_max_hyb(q_time[p2], r_time_val));
+
+            final_log.push_back({OpType::SWAP, -1, -1, -1, p1, p2, chosen_res, start_time});
+            out_swaps++;
+            total_routing_cost += SWAP_COST;
+
+            q_time[p1] = q_time[p2] = start_time + SWAP_COST;
+            if (chosen_res != -1) r_time[chosen_res] = start_time + SWAP_COST;
+
+            int max_d = fast_max_hyb(q_depth[p1], q_depth[p2]) + 1;
+            q_depth[p1] = q_depth[p2] = max_d;
+        }
+    }
+
+    // Czyszczenie końcowe - ściągamy wszystkie stany na węzły fizyczne
+    for (int p = 0; p < p_cnt; ++p) force_down(p);
+
+    double max_physical_time = *std::max_element(q_time.begin(), q_time.end());
+    int max_logical_depth = *std::max_element(q_depth.begin(), q_depth.end());
+
+    // Liczymy identyczny koszt fitness w celu bezpośredniego porównania
+    double final_score = (total_routing_cost * 100.0) + (out_swaps * 500.0) + (max_physical_time * 0.1) + (max_logical_depth * 0.05);
+
+    std::cout << "\n============================================================\n";
+    std::cout << "=== FINALNA EWALUACJA PROFILU QISKIT SABRE NA MODELU IQM ===\n";
+
+    // UWAGA: Upewnij się, że masz metodę print_statistics dostępną w swojej klasie.
+    // print_statistics(final_score, max_physical_time, max_logical_depth, out_swaps, out_moves, 0.0);
+
+    std::cout << "KOSZT: " << final_score << " | CZAS FIZYCZNY: " << max_physical_time << " | GŁĘBOKOŚĆ: " << max_logical_depth << "\n";
+    std::cout << "SWAPY: " << out_swaps << " | MOVES: " << out_moves << "\n";
+    std::cout << "============================================================\n";
+
+    // export_moves_to_file(final_log, "../qiskit_faithful_schedule_" + name + ".txt");
+
+    return {final_score, max_physical_time, max_logical_depth, out_swaps, out_moves};
 }
