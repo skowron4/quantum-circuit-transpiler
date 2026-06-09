@@ -234,7 +234,7 @@ private:
 
     std::vector<int> prepare_sabre_seed();
     void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);
-    double calculate_fitness_score(double routing_cost, int swaps, double max_time, int max_depth);
+    double calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth);
     template <bool LOGGING>
     void force_remaining_qubits_down(DERunContext& ctx, const double* genes, int n_gates, int p_cnt, std::vector<RoutingRecord>* out_log);
     void extract_max_metrics(const DERunContext& ctx, double& max_physical_time, int& max_logical_depth);

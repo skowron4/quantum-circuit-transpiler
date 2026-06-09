@@ -7,7 +7,7 @@
 #include "dEHybridSabre/SabreDEHybridRouter.h"
 
 SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name)
-    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)) {
+    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)), rng(std::random_device{}()) {
 
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
@@ -31,6 +31,10 @@ SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& 
     reversed_dag = build_dag(reversed_circuit);
 }
 
+void SabreRouter::set_random_seed(uint32_t seed) {
+    rng.seed(seed);
+}
+
 int SabreRouter::get_distance(int p1, int p2) const {
     if (p1 == p2) return 0;
     int p_cnt = topo.qubits.size();
@@ -42,6 +46,22 @@ int SabreRouter::get_distance(int p1, int p2) const {
     dist_cache[idx1] = dist;
     dist_cache[p2 * p_cnt + p1] = dist;
     return dist;
+}
+
+std::vector<int> SabreRouter::create_random_initial_mapping() {
+    std::vector<int> physical_qubits(topo.qubits.size());
+    for (int i = 0; i < static_cast<int>(physical_qubits.size()); ++i) {
+        physical_qubits[i] = i;
+    }
+
+    std::shuffle(physical_qubits.begin(), physical_qubits.end(), rng);
+
+    std::vector<int> initial_mapping(num_qubits, -1);
+    for (int lq = 0; lq < num_qubits && lq < static_cast<int>(physical_qubits.size()); ++lq) {
+        initial_mapping[lq] = physical_qubits[lq];
+    }
+
+    return initial_mapping;
 }
 
 SabreDAG SabreRouter::build_dag(const std::vector<Gate>& circuit) const {
@@ -372,6 +392,7 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
 
     // --- 2. EWALUACJA DELTA (O(k) zamiast O(N)) ---
     SwapCandidate best_candidate = {-1, -1, -1, std::numeric_limits<double>::max()};
+    std::uniform_real_distribution<double> jitter_dist(0.0, 1e-6);
 
     for (int p : active_phys_qubits) {
         for (const stockSwapEdge& edge : precomputed_swaps[p]) {
@@ -447,6 +468,10 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
             double time_tie_breaker = 0.0001 * fast_max_sabre(state.q_ready_time[u], state.q_ready_time[v]);
             score += time_tie_breaker;
 
+            // Klasyczny SABRE zwykle odpala wiele losowych prób. Tu dodajemy mikroskopijny
+            // jitter, żeby remisy i prawie-remisy nie były zawsze rozstrzygane kolejnością krawędzi.
+            score += jitter_dist(rng);
+
             if (score < best_candidate.score) {
                 best_candidate = {u, v, r, score};
             }
@@ -510,7 +535,7 @@ void SabreRouter::apply_swap_candidate(const SwapCandidate& candidate, MachineSt
     decay[p2] += DECAY_INCREMENT;
 }
 
-std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final) {
+SabreRouter::SabrePassResult SabreRouter::run_pass(const SabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, bool print_details) {
     int n_gates = current_dag.nodes.size();
 
     MachineState state;
@@ -648,6 +673,8 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
         }
     }
 
+    SabreBenchmarkResult benchmark;
+
     if (is_final) {
         for (size_t p = 0; p < topo.qubits.size(); ++p) force_qubit_down(p, -1, state, q_logical_depth, log, out_moves, total_routing_cost, is_final);
 
@@ -660,44 +687,146 @@ std::vector<int> SabreRouter::run_pass(const SabreDAG& current_dag, const std::v
         for (double t : state.q_ready_time) max_physical_time = fast_max_sabre(max_physical_time, t);
         for (int d : q_logical_depth) max_logical_depth = fast_max_sabre(max_logical_depth, d);
 
-        std::cout << "\n=== WYNIKI BENCHMARKU (SABRE High-Perf BiDirectional) ===" << std::endl;
-        std::cout << "Wykorzystane operacje SWAP: " << out_swaps << std::endl;
-        std::cout << "Wykorzystane operacje MOVE: " << out_moves << std::endl;
-        std::cout << "Czas fizyczny obwodu (Makespan): " << max_physical_time << " [jednostek]" << std::endl;
-        std::cout << "Głębokość warstwowa (Logical Depth): " << max_logical_depth << " [warstw]" << std::endl;
-        std::cout << "Koszt routingu (Total Routing Cost): " << total_routing_cost << std::endl;
+        benchmark.score = total_routing_cost;
+        benchmark.makespan = max_physical_time;
+        benchmark.depth = max_logical_depth;
+        benchmark.swaps = out_swaps;
+        benchmark.moves = out_moves;
+
+        if (print_details) {
+            std::cout << "\n=== WYNIKI BENCHMARKU (SABRE High-Perf BiDirectional) ===" << std::endl;
+            std::cout << "Wykorzystane operacje SWAP: " << out_swaps << std::endl;
+            std::cout << "Wykorzystane operacje MOVE: " << out_moves << std::endl;
+            std::cout << "Czas fizyczny obwodu (Makespan): " << max_physical_time << " [jednostek]" << std::endl;
+            std::cout << "Głębokość warstwowa (Logical Depth): " << max_logical_depth << " [warstw]" << std::endl;
+            std::cout << "Koszt routingu (Total Routing Cost): " << total_routing_cost << std::endl;
+        }
 
         // print_optimized_circuit(log, num_qubits);
 
-        std::cout << "=== WALIDACJA OBWODU LOGICZNEGO ===\n";
-        if (!validate_logical_circuit(original_circuit, log)) {
+        if (print_details) std::cout << "=== WALIDACJA OBWODU LOGICZNEGO ===\n";
+        if (!validate_logical_circuit(original_circuit, log, print_details)) {
             exit(-1);
         }
-        std::cout << "===================================\n\n";
+        if (print_details) std::cout << "===================================\n\n";
     }
 
-    return state.logical_to_phys_qubit;
+    return {state.logical_to_phys_qubit, benchmark};
 }
 
-void SabreRouter::run_benchmark() {
+SabreBenchmarkResult SabreRouter::run_benchmark(bool print_details) {
     // ... Wnętrze funkcji (pozostawione bez zmian) ...
-    std::cout << "Uruchamiam benchmark SABRE (High-Performance Engine)... " << std::endl;
-    auto start_time = std::chrono::high_resolution_clock::now();
+    if (print_details) std::cout << "Uruchamiam benchmark SABRE (High-Performance Engine)... " << std::endl;
+    auto start_time = std::chrono::steady_clock::now();
 
-    std::vector<int> initial_mapping(num_qubits);
-    for (int i = 0; i < num_qubits; ++i) initial_mapping[i] = i;
+    std::vector<int> initial_mapping = create_random_initial_mapping();
 
-    std::vector<int> post_forward_mapping = run_pass(dag, initial_mapping, false);
-    std::vector<int> pre_final_mapping = run_pass(reversed_dag, post_forward_mapping, false);
-    run_pass(dag, pre_final_mapping, true);
+    std::vector<int> post_forward_mapping = run_pass(dag, initial_mapping, false, print_details).mapping;
+    std::vector<int> pre_final_mapping = run_pass(reversed_dag, post_forward_mapping, false, print_details).mapping;
+    SabreBenchmarkResult result = run_pass(dag, pre_final_mapping, true, print_details).benchmark;
 
-    auto end_time = std::chrono::high_resolution_clock::now();
+    auto end_time = std::chrono::steady_clock::now();
     std::chrono::duration<double> execution_time = end_time - start_time;
-    std::cout << "Czas wykonania całego procesu (F-B-F): " << execution_time.count() << " sekund" << std::endl;
-    std::cout << "=========================================================\n" << std::endl;
+    result.execution_time = execution_time.count();
+    if (print_details) {
+        std::cout << "Czas wykonania całego procesu (F-B-F): " << execution_time.count() << " sekund" << std::endl;
+        std::cout << "=========================================================\n" << std::endl;
+    }
+    return result;
 }
 
-bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log) const {
+void SabreRouter::run_benchmark_multiple(int num_runs) {
+    if (num_runs <= 0) {
+        std::cout << "Liczba uruchomien SABRE musi byc dodatnia.\n";
+        return;
+    }
+
+    std::cout << "\n--- Rozpoczynam " << num_runs << " iteracji dla SABRE ---\n";
+    auto total_start_time = std::chrono::steady_clock::now();
+
+    std::vector<SabreBenchmarkResult> results;
+    results.reserve(num_runs);
+
+    for (int i = 0; i < num_runs; ++i) {
+        SabreBenchmarkResult result = run_benchmark(false);
+        results.push_back(result);
+    }
+
+    auto total_end_time = std::chrono::steady_clock::now();
+    std::chrono::duration<double> total_execution_time = total_end_time - total_start_time;
+
+    SabreBenchmarkResult min_val = results[0];
+    SabreBenchmarkResult max_val = results[0];
+    SabreBenchmarkResult sum_val = results[0];
+    SabreBenchmarkResult best_val = results[0];
+    int best_run = 1;
+
+    for (int i = 1; i < num_runs; ++i) {
+        if (results[i].score < best_val.score) {
+            best_val = results[i];
+            best_run = i + 1;
+        }
+
+        min_val.score = std::min(min_val.score, results[i].score);
+        max_val.score = std::max(max_val.score, results[i].score);
+        sum_val.score += results[i].score;
+
+        min_val.makespan = std::min(min_val.makespan, results[i].makespan);
+        max_val.makespan = std::max(max_val.makespan, results[i].makespan);
+        sum_val.makespan += results[i].makespan;
+
+        min_val.execution_time = std::min(min_val.execution_time, results[i].execution_time);
+        max_val.execution_time = std::max(max_val.execution_time, results[i].execution_time);
+        sum_val.execution_time += results[i].execution_time;
+
+        min_val.depth = std::min(min_val.depth, results[i].depth);
+        max_val.depth = std::max(max_val.depth, results[i].depth);
+        sum_val.depth += results[i].depth;
+
+        min_val.swaps = std::min(min_val.swaps, results[i].swaps);
+        max_val.swaps = std::max(max_val.swaps, results[i].swaps);
+        sum_val.swaps += results[i].swaps;
+
+        min_val.moves = std::min(min_val.moves, results[i].moves);
+        max_val.moves = std::max(max_val.moves, results[i].moves);
+        sum_val.moves += results[i].moves;
+    }
+
+    std::cout << "\n============================================\n";
+    std::cout << " PODSUMOWANIE SABRE (" << num_runs << " uruchomien)\n";
+    std::cout << "============================================\n";
+
+    std::cout << " [NAJLEPSZY PRZEBIEG]\n";
+    std::cout << " Iteracja: " << best_run << "\n";
+    std::cout << " Wynik: " << best_val.score << "\n";
+    std::cout << " Makespan: " << best_val.makespan << "\n";
+    std::cout << " Depth: " << best_val.depth << "\n";
+    std::cout << " SWAPy: " << best_val.swaps << "\n";
+    std::cout << " MOVEs: " << best_val.moves << "\n";
+    std::cout << " Czas wykonania: " << best_val.execution_time << " sekund\n";
+
+    std::cout << " [SCORE]\n";
+    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Srednia: " << (sum_val.score / num_runs) << "\n";
+
+    std::cout << " [MAKESPAN]\n";
+    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Srednia: " << (sum_val.makespan / num_runs) << "\n";
+
+    std::cout << " [DEPTH]\n";
+    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Srednia: " << (static_cast<double>(sum_val.depth) / num_runs) << "\n";
+
+    std::cout << " [SWAPS]\n";
+    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Srednia: " << (static_cast<double>(sum_val.swaps) / num_runs) << "\n";
+
+    std::cout << " [MOVES]\n";
+    std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Srednia: " << (static_cast<double>(sum_val.moves) / num_runs) << "\n";
+
+    std::cout << " [CZAS WYKONANIA]\n";
+    std::cout << " Min: " << min_val.execution_time << " | Max: " << max_val.execution_time << " | Srednia: " << (sum_val.execution_time / num_runs) << " sekund\n";
+    std::cout << " Lacznie dla " << num_runs << " uruchomien: " << total_execution_time.count() << " sekund\n";
+    std::cout << "============================================\n";
+}
+
+bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log, bool print_success) const {
     // 1. Zbieramy oczekiwaną sekwencję ID z DAG-a
     std::vector<std::vector<int>> expected(num_qubits);
     for (const auto& node : dag.nodes) {
@@ -733,7 +862,7 @@ bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, c
         }
     }
 
-    if (is_valid) {
+    if (is_valid && print_success) {
         std::cout << "[OK] Walidacja pomyślna. Czystość logiczna (ID bramek z DAG) zachowana na 100% (SABRE)!\n";
     }
     return is_valid;

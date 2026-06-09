@@ -902,8 +902,8 @@ inline void SabreDEHybridRouter::extract_max_metrics(const DERunContext& ctx, do
     max_logical_depth = *std::max_element(ctx.q_depth.begin(), ctx.q_depth.end());
 }
 
-inline double SabreDEHybridRouter::calculate_fitness_score(double routing_cost, int swaps, double max_time, int max_depth) {
-    return (routing_cost * 100.0) + (swaps * 500.0) + (max_time * 0.1) + (max_depth * 0.05);
+inline double SabreDEHybridRouter::calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth) {
+    return (routing_cost * 100.0) + (swaps * 500.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
 }
 
 // --- GŁÓWNA FUNKCJA ---
@@ -930,7 +930,7 @@ double SabreDEHybridRouter::finalize_evaluation(DERunContext& ctx, const double*
     out_moves = ctx.out_moves;
 
     // 4. Obliczenie wartości fitness
-    return calculate_fitness_score(ctx.total_routing_cost, out_swaps, max_physical_time, max_logical_depth);
+    return calculate_fitness_score(ctx.total_routing_cost, out_swaps, out_moves, max_physical_time, max_logical_depth);
 }
 
 // ==============================================================================

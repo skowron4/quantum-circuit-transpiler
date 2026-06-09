@@ -8,6 +8,7 @@
 #include <limits>
 #include <string>
 #include <sstream>
+#include <random>
 #include <cstdint> // <- DODANE DLA uint8_t
 
 #include "architecture/BaseTopology.h"
@@ -33,6 +34,15 @@ struct SwapCandidate {
     double score;
 };
 
+struct SabreBenchmarkResult {
+    double score = 0.0;
+    double makespan = 0.0;
+    double execution_time = 0.0;
+    int depth = 0;
+    int swaps = 0;
+    int moves = 0;
+};
+
 // NOWE: Struktura prekompilowanych krawędzi
 struct stockSwapEdge {
     int neighbor;
@@ -43,9 +53,16 @@ class SabreRouter {
 public:
     SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name);
 
-    void run_benchmark();
+    SabreBenchmarkResult run_benchmark(bool print_details = true);
+    void run_benchmark_multiple(int num_runs = 30);
+    void set_random_seed(uint32_t seed);
 
 private:
+    struct SabrePassResult {
+        std::vector<int> mapping;
+        SabreBenchmarkResult benchmark;
+    };
+
     static constexpr int RES_OFFSET = 1000;
     static constexpr double EXTENDED_LAYER_WEIGHT = 0.5;
     static constexpr double MOVE_COST = 1.0;
@@ -59,15 +76,17 @@ private:
     std::string name;
 
     mutable std::vector<int> dist_cache;
+    mutable std::mt19937 rng;
     std::vector<std::vector<stockSwapEdge>> precomputed_swaps; // NOWE
     SabreDAG dag;
     SabreDAG reversed_dag;
 
     int get_distance(int p1, int p2) const;
+    std::vector<int> create_random_initial_mapping();
     SabreDAG build_dag(const std::vector<Gate>& circuit) const;
-    std::vector<int> run_pass(const SabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final);
+    SabrePassResult run_pass(const SabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, bool print_details = true);
 
-    bool validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log) const;
+    bool validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log, bool print_success = true) const;
     void print_optimized_circuit(const std::vector<RoutingRecord>& log, int num_logical_qubits) const;
 
     void force_qubit_down(int p, int current_gate_id, MachineState& state, std::vector<int>& q_logical_depth,
