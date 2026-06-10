@@ -140,8 +140,8 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     std::random_device rd;
     const uint32_t sabre_seed = rd();
     const uint64_t hybrid_seed = sabre_seed;
-    const int sabre_runs = 1000;
-    const int hybrid_sabre_seed_trials = 100; // liczba losowych ustawien startowych SABRE dla ziarna DE
+    const int sabre_runs = 50;
+    const int hybrid_sabre_seed_trials = 50; // liczba losowych ustawien startowych SABRE dla ziarna DE
 
     // 1. Wykonanie algorytmu bazowego (Benchmark zachłanny ASAP)
     // GreedyASAP greedy_router(qpu, circuit, qpu.get_num_qubits(), name);
@@ -158,10 +158,10 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     sabre.run_benchmark_multiple(sabre_runs);
 
     // 4. Wykonanie algorytmu DEHybridSabre
-    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 10);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
     SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
     SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
-    SabreDERouter.optimize_windowed(30, 300, 4800, 1.0, false, 0.8);
+    SabreDERouter.optimize_windowed(30, 400, 500, 0.6, false, 0.8);
 
     // 5. Wykonanie algorytmu newDEHybridSabre
     // newSabreDEHybridRouter newSabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
@@ -187,9 +187,9 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     std::random_device rd;
     const uint32_t sabre_seed = rd();
     const uint64_t hybrid_seed = sabre_seed;
-    const int sabre_runs = 5000;
+    const int sabre_runs = 50;
     const int hybrid_runs = 10;
-    const int hybrid_sabre_seed_trials = 100;
+    const int hybrid_sabre_seed_trials = 10;
 
     SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
     sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
@@ -201,12 +201,12 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     results.reserve(hybrid_runs);
 
     for (int i = 0; i < hybrid_runs; ++i) {
-        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 10);
+        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 4);
         SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
         SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 
         // Odbieramy całą strukturę wyników
-        OptimizationResult res = SabreDERouter.optimize_windowed(30, 600, 4000, 1.0,  false, 0.9);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 200, 4000, 1.0,  false, 0.2);
         results.push_back(res);
 
         std::cout << "Iteracja " << (i + 1) << " zakonczona. "
@@ -278,136 +278,136 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     std::cout << "============================================\n";
 }
 
-// int main() {
-// #ifdef _WIN32
-//     // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
-//     SetConsoleOutputCP(CP_UTF8);
-//     // Opcjonalnie: upewnia się, że wejście (cin) też używa UTF-8
-//     SetConsoleCP(CP_UTF8);
-// #endif
-//     // Topologia siatki 2x2
-//      // IQMConstellation gridQpu(5, 5);
-//      // run_test_for_topology(gridQpu, "Siatka 5x5");
-//      // run_test_for_topologyII(gridQpu, "Siatka 5x5");
-//
-//     // Topologia trójkątna
+ int main() {
+ #ifdef _WIN32
+     // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
+     SetConsoleOutputCP(CP_UTF8);
+     // Opcjonalnie: upewnia się, że wejście (cin) też używa UTF-8
+     SetConsoleCP(CP_UTF8);
+ #endif
+     // Topologia siatki 2x2
+       IQMConstellation gridQpu(5, 5);
+       run_test_for_topology(gridQpu, "Siatka 5x5");
+//       run_test_for_topologyII(gridQpu, "Siatka 5x5");
+
+     // Topologia trójkątna
 //     IQMTriangleConstellation triangleQpu;
 //     run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
-//     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
+     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
+
+     return 0;
+ }
+
+
+//int main(int argc, char* argv[]) {
+//    // Domyślny folder z wygenerowanymi benchmarkami
+//    std::string base_dir = "../iqm_benchmarks";
 //
-//     return 0;
-// }
-
-
-int main(int argc, char* argv[]) {
-    // Domyślny folder z wygenerowanymi benchmarkami
-    std::string base_dir = "../iqm_benchmarks";
-
-    if (argc >= 2) {
-        base_dir = argv[1];
-    }
-
-    if (!std::filesystem::exists(base_dir) || !std::filesystem::is_directory(base_dir)) {
-        std::cerr << "Blad: Katalog '" << base_dir << "' nie istnieje. Najpierw uruchom skrypt Pythona!\n";
-        return -1;
-    }
-
-    std::cout << "=> Rozpoczynam przetwarzanie plikow w katalogu: " << base_dir << "\n";
-
-    // --- Konfiguracja losowosci i liczby prob ---
-    bool use_random_seeds = false;
-    std::random_device rd;
-    uint32_t sabre_seed = rd();
-    uint64_t hybrid_seed = sabre_seed;
-    int sabre_runs = 300;
-    int hybrid_sabre_seed_trials = 4;
-
-    // Rekursywna iteracja po wszystkich plikach i podfolderach
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".json") {
-
-            std::string input_file = entry.path().string();
-
-            // Zabezpieczenie: pomijamy pliki, które już są wynikiem naszego routingu
-            if (input_file.find("_routed.json") != std::string::npos) {
-                continue;
-            }
-
-            // Tworzymy nazwe pliku wyjsciowego: np. obwod_5q_50g_routed.json
-            std::string output_file = input_file.substr(0, input_file.find_last_of('.')) + "_routed.json";
-
-            std::cout << "\n--------------------------------------------------\n";
-            std::cout << "=> Wczytywanie: " << input_file << "\n";
-
-            int logical_qubits;
-            std::vector<Gate> circuit = CircuitIO::load_circuit(input_file, logical_qubits);
-
-            if(circuit.empty()) {
-                std::cerr << "Blad wczytywania obwodu. Pomijam plik.\n";
-                continue;
-            }
-
-            // =========================================================
-            // --- CAP DLA TESTÓW (DO 16 KUBITÓW) ---
-            // Zakomentuj poniższego if-a, gdy zechcesz odpalić całość
-            if (logical_qubits > 45 || logical_qubits > 44) {
-            // if (false) {
-                std::cout << "=> Pomijam (ma " << logical_qubits << " kubitow, a limit testowy to 16).\n";
-                continue; // Skaczemy do następnego pliku w folderze
-            }
-            // =========================================================
-
-            std::cout << "Bramki: " << circuit.size() << " | Kubity: " << logical_qubits << "\n";
-
-            // --- Logika Topologii ---
-            std::unique_ptr<BaseTopology> topology;
-            if (logical_qubits <= 13) {
-                topology = std::make_unique<IQMTriangleConstellation>();
-            } else {
-                int dim = 2;
-                topology = std::make_unique<IQMConstellation>(dim, dim);
-                while (topology->get_num_qubits() < logical_qubits) {
-                    dim++;
-                    topology = std::make_unique<IQMConstellation>(dim, dim);
-                }
-            }
-
-            // --- Konfiguracja Metaheurystyki ---
-            bool use_slow_mode = false;
-            int lookahead_depth = 3;
-
-            topology->print_stats();
-
-            SabreRouter sabre(*topology, circuit, logical_qubits, "sabre_run");
-            sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
-            sabre.run_benchmark_multiple(sabre_runs);
-
-            SabreDEHybridRouter router(*topology, circuit, logical_qubits, "qiskit_run", use_slow_mode, lookahead_depth);
-            router.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
-            router.set_sabre_seed_trials(hybrid_sabre_seed_trials);
-
-            int pop_size = 30;
-            int generations_per_window = 300;
-            int window_size = 16600;
-            double accept_ratio = 1.0;
-            bool lazy_offboard = true;
-
-            // --- Uruchomienie optymalizacji ---
-            OptimizationResult result = router.optimize_windowed(pop_size, generations_per_window, window_size, accept_ratio, lazy_offboard);
-
-            // --- Zapis wyjścia ---
-            // Odkomentuj i dostosuj ponizsze linijki zgodnie z Twoim API
-            // std::vector<Gate> routed_circuit = router.get_routed_circuit();
-            // CircuitIO::save_circuit(output_file, routed_circuit);
-
-            std::cout << "=> Zapisano wynik do: " << output_file << "\n";
-        }
-    }
-
-    std::cout << "\n==================================================\n";
-    std::cout << "Zakonczono przetwarzanie wszystkich obwodow z folderu: " << base_dir << "\n";
-    return 0;
-}
+//    if (argc >= 2) {
+//        base_dir = argv[1];
+//    }
+//
+//    if (!std::filesystem::exists(base_dir) || !std::filesystem::is_directory(base_dir)) {
+//        std::cerr << "Blad: Katalog '" << base_dir << "' nie istnieje. Najpierw uruchom skrypt Pythona!\n";
+//        return -1;
+//    }
+//
+//    std::cout << "=> Rozpoczynam przetwarzanie plikow w katalogu: " << base_dir << "\n";
+//
+//    // --- Konfiguracja losowosci i liczby prob ---
+//    bool use_random_seeds = false;
+//    std::random_device rd;
+//    uint32_t sabre_seed = rd();
+//    uint64_t hybrid_seed = sabre_seed;
+//    int sabre_runs = 300;
+//    int hybrid_sabre_seed_trials = 4;
+//
+//    // Rekursywna iteracja po wszystkich plikach i podfolderach
+//    for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
+//        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+//
+//            std::string input_file = entry.path().string();
+//
+//            // Zabezpieczenie: pomijamy pliki, które już są wynikiem naszego routingu
+//            if (input_file.find("_routed.json") != std::string::npos) {
+//                continue;
+//            }
+//
+//            // Tworzymy nazwe pliku wyjsciowego: np. obwod_5q_50g_routed.json
+//            std::string output_file = input_file.substr(0, input_file.find_last_of('.')) + "_routed.json";
+//
+//            std::cout << "\n--------------------------------------------------\n";
+//            std::cout << "=> Wczytywanie: " << input_file << "\n";
+//
+//            int logical_qubits;
+//            std::vector<Gate> circuit = CircuitIO::load_circuit(input_file, logical_qubits);
+//
+//            if(circuit.empty()) {
+//                std::cerr << "Blad wczytywania obwodu. Pomijam plik.\n";
+//                continue;
+//            }
+//
+//            // =========================================================
+//            // --- CAP DLA TESTÓW (DO 16 KUBITÓW) ---
+//            // Zakomentuj poniższego if-a, gdy zechcesz odpalić całość
+//            if (logical_qubits > 45 || logical_qubits > 44) {
+//            // if (false) {
+//                std::cout << "=> Pomijam (ma " << logical_qubits << " kubitow, a limit testowy to 16).\n";
+//                continue; // Skaczemy do następnego pliku w folderze
+//            }
+//            // =========================================================
+//
+//            std::cout << "Bramki: " << circuit.size() << " | Kubity: " << logical_qubits << "\n";
+//
+//            // --- Logika Topologii ---
+//            std::unique_ptr<BaseTopology> topology;
+//            if (logical_qubits <= 13) {
+//                topology = std::make_unique<IQMTriangleConstellation>();
+//            } else {
+//                int dim = 2;
+//                topology = std::make_unique<IQMConstellation>(dim, dim);
+//                while (topology->get_num_qubits() < logical_qubits) {
+//                    dim++;
+//                    topology = std::make_unique<IQMConstellation>(dim, dim);
+//                }
+//            }
+//
+//            // --- Konfiguracja Metaheurystyki ---
+//            bool use_slow_mode = false;
+//            int lookahead_depth = 3;
+//
+//            topology->print_stats();
+//
+//            SabreRouter sabre(*topology, circuit, logical_qubits, "sabre_run");
+//            sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
+//            sabre.run_benchmark_multiple(sabre_runs);
+//
+//            SabreDEHybridRouter router(*topology, circuit, logical_qubits, "qiskit_run", use_slow_mode, lookahead_depth);
+//            router.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
+//            router.set_sabre_seed_trials(hybrid_sabre_seed_trials);
+//
+//            int pop_size = 30;
+//            int generations_per_window = 300;
+//            int window_size = 16600;
+//            double accept_ratio = 1.0;
+//            bool lazy_offboard = true;
+//
+//            // --- Uruchomienie optymalizacji ---
+//            OptimizationResult result = router.optimize_windowed(pop_size, generations_per_window, window_size, accept_ratio, lazy_offboard);
+//
+//            // --- Zapis wyjścia ---
+//            // Odkomentuj i dostosuj ponizsze linijki zgodnie z Twoim API
+//            // std::vector<Gate> routed_circuit = router.get_routed_circuit();
+//            // CircuitIO::save_circuit(output_file, routed_circuit);
+//
+//            std::cout << "=> Zapisano wynik do: " << output_file << "\n";
+//        }
+//    }
+//
+//    std::cout << "\n==================================================\n";
+//    std::cout << "Zakonczono przetwarzanie wszystkich obwodow z folderu: " << base_dir << "\n";
+//    return 0;
+//}
 
 // Funkcja pomocnicza do zapisu wyników i kalkulacji statystyk do pliku
 void save_statistics_to_file(const std::filesystem::path& file_path, const std::string& method_name, const std::vector<OptimizationResult>& results) {

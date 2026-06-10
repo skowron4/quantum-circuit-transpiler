@@ -137,6 +137,13 @@ struct SabreRunContext {
     double total_routing_cost = 0.0;
 };
 
+struct SabreSeedProfile {
+    std::vector<int> logical_exec_order;
+    std::vector<int> resonator_choice_index;
+    std::vector<int> resonator_choice_count;
+    std::vector<int> q1_goes_in;
+};
+
 // Kontekst dla ewaluacji DE oparty o pre-alokowany workspace
 struct DERunContext {
     std::vector<int>& l2p;
@@ -187,6 +194,7 @@ private:
     HybridSabreDAG reversed_dag;
     HybridWorkspace workspace;
     std::vector<int> saved_initial_l2p;
+    SabreSeedProfile sabre_seed_profile;
 
     // --- Metody Bazowe ---
     int get_distance_old(int p1, int p2) const;
@@ -197,12 +205,12 @@ private:
     void compute_initial_deps(HybridSabreDAG& local_dag) const;
 
     // --- Metody Pomocnicze SABRE ---
-    std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, std::vector<int>* out_logical_order, double* out_routing_cost = nullptr, bool print_details = true);
+    std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, SabreSeedProfile* out_seed_profile, double* out_routing_cost = nullptr, bool print_details = true);
     void sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx);
-    void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, std::vector<int>* out_logical_order);
+    void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, SabreSeedProfile* out_seed_profile);
     bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
     inline void sabre_execute_1q_gate(const HybridGateNode& node, int p1, SabreRunContext& ctx);
-    inline void sabre_execute_2q_gate(const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx);
+    inline void sabre_execute_2q_gate(const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx, SabreSeedProfile* out_seed_profile);
     inline void extract_sabre_executables(const HybridSabreDAG& current_dag, std::vector<int>& front_layer, std::vector<int>& executable_gates, SabreRunContext& ctx);
     inline void build_sabre_lookahead(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, std::vector<std::vector<int>>& lookahead_layers, std::vector<bool>& in_extended);
     std::vector<int> create_random_initial_mapping();
@@ -243,7 +251,7 @@ private:
     std::vector<int> create_time_decay_mapping() const;
     std::vector<int> create_identity_mapping() const;
     std::vector<int> create_degree_based_mapping() const;
-    void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);
+    void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const SabreSeedProfile& seed_profile, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);
     double calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth);
     template <bool LOGGING>
     void force_remaining_qubits_down(DERunContext& ctx, const double* genes, int n_gates, int p_cnt, std::vector<RoutingRecord>* out_log);
