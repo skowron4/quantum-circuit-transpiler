@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <limits>
+#include <cstdint>
 #include <boost/random/xoshiro.hpp>
 
 struct OptimizationResult {
@@ -163,6 +164,8 @@ private:
     static constexpr double MOVE_COST = 1.0;
     static constexpr double SWAP_COST = 3.14;
     static constexpr double EXTENDED_LAYER_WEIGHT = 0.5;
+    static constexpr double DECAY_RESET = 1.0;
+    static constexpr double DECAY_INCREMENT = 0.2;
 
     const BaseTopology& topo;
     std::vector<Gate> original_circuit;
@@ -172,6 +175,9 @@ private:
     int p_cnt_cache;
 
     bool slow;
+    uint64_t random_seed = 1337;
+    int sabre_seed_trials = 1;
+    mutable boost::random::xoshiro256pp sabre_rng;
 
     std::vector<SwapEdge> flat_precomputed_swaps;
     std::vector<int> precomputed_swaps_offsets;
@@ -191,7 +197,7 @@ private:
     void compute_initial_deps(HybridSabreDAG& local_dag) const;
 
     // --- Metody Pomocnicze SABRE ---
-    std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, std::vector<int>* out_logical_order);
+    std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, std::vector<int>* out_logical_order, double* out_routing_cost = nullptr, bool print_details = true);
     void sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx);
     void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, std::vector<int>* out_logical_order);
     bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
@@ -199,6 +205,7 @@ private:
     inline void sabre_execute_2q_gate(const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx);
     inline void extract_sabre_executables(const HybridSabreDAG& current_dag, std::vector<int>& front_layer, std::vector<int>& executable_gates, SabreRunContext& ctx);
     inline void build_sabre_lookahead(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, std::vector<std::vector<int>>& lookahead_layers, std::vector<bool>& in_extended);
+    std::vector<int> create_random_initial_mapping();
 
     // --- Metody Pomocnicze do ewaluacji (wydzielone z evaluate_fitness_impl) ---
     void reset_evaluation_state(DERunContext& ctx, std::vector<RoutingRecord>* out_log);
@@ -304,6 +311,8 @@ private:
 public:
     SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow = false, int max_look_ahead_depth = 1);
 
+    void set_random_seed(uint64_t seed);
+    void set_sabre_seed_trials(int trials);
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
     OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.9, double cr = 0.9);
     OptimizationResult evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit);

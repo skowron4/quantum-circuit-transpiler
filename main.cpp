@@ -138,10 +138,10 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // --- Konfiguracja losowosci i liczby prob ---
     const bool use_random_seeds = false;
     std::random_device rd;
-    const uint32_t sabre_seed = rd();
-    const uint64_t hybrid_seed = rd();
-    const int sabre_runs = 600;
-    const int hybrid_sabre_initial_trials = 600; // 1 identity + 99 losowych mapowan startowych
+    const uint32_t sabre_seed = 1337;
+    const uint64_t hybrid_seed = sabre_seed;
+    const int sabre_runs = 10;
+    const int hybrid_sabre_seed_trials = 10; // liczba losowych ustawien startowych SABRE dla ziarna DE
 
     // 1. Wykonanie algorytmu bazowego (Benchmark zachłanny ASAP)
     // GreedyASAP greedy_router(qpu, circuit, qpu.get_num_qubits(), name);
@@ -158,9 +158,10 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     sabre.run_benchmark_multiple(sabre_runs);
 
     // 4. Wykonanie algorytmu DEHybridSabre
-    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 5);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
     SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
-    SabreDERouter.optimize_windowed(30, 300, 4800, 1.0, false, 0.9);
+    SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
+    SabreDERouter.optimize_windowed(30, 300, 4800, 1.0, false, 0.8);
 
     // 5. Wykonanie algorytmu newDEHybridSabre
     // newSabreDEHybridRouter newSabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
@@ -188,6 +189,7 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     const uint64_t hybrid_seed = 1337;
     const int sabre_runs = 10;
     const int hybrid_runs = 5;
+    const int hybrid_sabre_seed_trials = 10;
 
     SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
     sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
@@ -201,9 +203,10 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     for (int i = 0; i < hybrid_runs; ++i) {
         SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
         SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
+        SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 
         // Odbieramy całą strukturę wyników
-        OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 500, 0.7,  false, 0.9);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 4000, 1.0,  false, 0.9);
         results.push_back(res);
 
         std::cout << "Iteracja " << (i + 1) << " zakonczona. "
@@ -303,7 +306,7 @@ int main() {
 //     uint32_t sabre_seed = 1234;
 //     uint64_t hybrid_seed = 1337;
 //     int sabre_runs = 600;
-//     int hybrid_sabre_initial_trials = 100; // 1 identity + 99 losowych mapowan startowych
+//     int hybrid_sabre_seed_trials = 10;
 //
 //     // Rekursywna iteracja po wszystkich plikach i podfolderach
 //     for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
@@ -367,7 +370,7 @@ int main() {
 //
 //             SabreDEHybridRouter router(*topology, circuit, logical_qubits, "qiskit_run", use_slow_mode, lookahead_depth);
 //             router.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
-//             router.set_sabre_initial_mapping_trials(hybrid_sabre_initial_trials);
+//             router.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 //
 //             int pop_size = 30;
 //             int generations_per_window = 200;
@@ -409,7 +412,7 @@ int main() {
 //    uint32_t sabre_seed = 1234;
 //    uint64_t hybrid_seed = 1337;
 //    int sabre_runs = 600;
-//    int hybrid_sabre_initial_trials = 100; // 1 identity + 99 losowych mapowan startowych
+//    int hybrid_sabre_seed_trials = 10;
 //
 //    for (const auto& entry : std::filesystem::recursive_directory_iterator(base_dir)) {
 //        if (entry.is_regular_file() && entry.path().extension() == ".json") {
@@ -449,7 +452,7 @@ int main() {
 //                int lookahead_depth = 2;
 //                SabreDEHybridRouter evaluator(*topology, qiskit_circuit, num_qubits_qiskit, "qiskit_run", use_slow_mode, lookahead_depth);
 //                evaluator.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
-//                evaluator.set_sabre_initial_mapping_trials(hybrid_sabre_initial_trials);
+//                evaluator.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 //                OptimizationResult qiskit_real_cost = evaluator.evaluate_qiskit_routed_circuit(qiskit_circuit);
 //
 //                continue; // Przejdź do następnego pliku
@@ -503,7 +506,7 @@ int main() {
 //
 //            SabreDEHybridRouter router(*topology, circuit, logical_qubits, "sabre_run", use_slow_mode, lookahead_depth);
 //            router.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
-//            router.set_sabre_initial_mapping_trials(hybrid_sabre_initial_trials);
+//            router.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 //
 //            int pop_size = 30;
 //            int generations_per_window = 200;
