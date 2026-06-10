@@ -140,7 +140,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     std::random_device rd;
     const uint32_t sabre_seed = 1337;
     const uint64_t hybrid_seed = sabre_seed;
-    const int sabre_runs = 10;
+    const int sabre_runs = 100;
     const int hybrid_sabre_seed_trials = 10; // liczba losowych ustawien startowych SABRE dla ziarna DE
 
     // 1. Wykonanie algorytmu bazowego (Benchmark zachłanny ASAP)
@@ -158,7 +158,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     sabre.run_benchmark_multiple(sabre_runs);
 
     // 4. Wykonanie algorytmu DEHybridSabre
-    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
+    SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 10);
     SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
     SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
     SabreDERouter.optimize_windowed(30, 300, 4800, 1.0, false, 0.8);
@@ -185,10 +185,10 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     // --- Konfiguracja losowosci i liczby prob ---
     const bool use_random_seeds = false;
     std::random_device rd;
-    const uint32_t sabre_seed = 1337;
-    const uint64_t hybrid_seed = 1337;
-    const int sabre_runs = 10;
-    const int hybrid_runs = 5;
+    const uint32_t sabre_seed = rd();
+    const uint64_t hybrid_seed = sabre_seed;
+    const int sabre_runs = 100;
+    const int hybrid_runs = 10;
     const int hybrid_sabre_seed_trials = 10;
 
     SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);

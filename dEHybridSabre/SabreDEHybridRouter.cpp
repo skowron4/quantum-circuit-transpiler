@@ -741,7 +741,7 @@ bool SabreDEHybridRouter::de_route_step_better(
                     layer_weight *= 0.5;
                 }
 
-                double score = (f_norm + ext_score) * fast_max_hyb(decay[u], decay[v]) * (0.95 + (genes[u % n_gates] * 0.1));
+                double score = (f_norm + ext_score) * fast_max_hyb(decay[u], decay[v]) * (0.95 + (genes[u % n_gates] * 0.15));
 
                 if (score < best_score) {
                     best_score = score;
@@ -912,7 +912,7 @@ inline void SabreDEHybridRouter::extract_max_metrics(const DERunContext& ctx, do
 }
 
 inline double SabreDEHybridRouter::calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth) {
-    return (routing_cost * 100.0) + (swaps * 500.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
+    return (routing_cost * 100.0) + (swaps * 314.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
 }
 
 // --- GŁÓWNA FUNKCJA ---
@@ -1011,7 +1011,7 @@ double SabreDEHybridRouter::evaluate_fitness_impl(const double* genes, int& out_
     }
 
     for (int i = 0; i < p_cnt; ++i) {
-        ctx.ws.phys_gene_weights[i] = 0.95 + (genes[i % n_gates] * 0.1);
+        ctx.ws.phys_gene_weights[i] = 0.95 + (genes[i % n_gates] * 0.15);
     }
 
     // --- GŁÓWNA PĘTLA SYMULACJI ---
@@ -1126,7 +1126,6 @@ void SabreDEHybridRouter::initialize_de_population(int pop_size, int n_genes, in
 
 void SabreDEHybridRouter::optimize(int pop_size, int generations, bool allow_lazy_offboard, double f, double cr) {
     std::cout << "\n[Hybryda 3.0] Faza 1: Generowanie ziarna (Priority Seed) przez heurystykę SABRE...\n";
-    std::vector<int> logical_exec_order = prepare_sabre_seed();
 
     int n_gates = dag.nodes.size();
     if (n_gates == 0) return;
@@ -1136,6 +1135,7 @@ void SabreDEHybridRouter::optimize(int pop_size, int generations, bool allow_laz
 
     int blocks = can_lazy ? 4 : 3;
     int n_genes = n_gates * blocks;
+    std::vector<int> logical_exec_order = prepare_sabre_seed(can_lazy, n_genes, blocks);
 
     std::cout << "[Hybryda 3.0] Odrzucono sztuczne SWAP-y. Wyciągnięto czysty harmonogram logiczny (" << logical_exec_order.size() << " bramek).\n";
     std::cout << "[Hybryda 3.0] Faza 2: Dynamiczne DE minimalizuje koszty na bazie ziarna...\n";
@@ -1188,20 +1188,20 @@ void SabreDEHybridRouter::run_standard_evolution_loop(std::vector<double>& pop, 
 OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_window, int window_size, double accept_ratio, bool allow_lazy_offboard, double f, double cr) {
     std::cout << "\n[Hybryda 3.0 (WINDOWED)] Faza 1: Generowanie ziarna (Priority Seed) przez heurystykę SABRE...\n";
 
-    std::vector<int> logical_exec_order = prepare_sabre_seed();
     int n_gates = dag.nodes.size();
     if (n_gates == 0) return {};
-
-    std::vector<int> gate_time_map(n_gates, 0);
-    for (size_t i = 0; i < logical_exec_order.size(); ++i) {
-        gate_time_map[logical_exec_order[i]] = i;
-    }
 
     bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
     if (can_lazy) std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
 
     int blocks = can_lazy ? 4 : 3;
     int n_genes = n_gates * blocks;
+    std::vector<int> logical_exec_order = prepare_sabre_seed(can_lazy, n_genes, blocks);
+
+    std::vector<int> gate_time_map(n_gates, 0);
+    for (size_t i = 0; i < logical_exec_order.size(); ++i) {
+        gate_time_map[logical_exec_order[i]] = i;
+    }
 
     std::cout << "[Hybryda 3.0] Faza 2: DE Windowed na bazie logicznej (Rozmiar okna: " << window_size << ")...\n";
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -1806,18 +1806,77 @@ inline void cache_initial_mapping(const std::vector<int>& pre_final_mapping, std
 }
 
 // --- GŁÓWNA FUNKCJA ---
+std::vector<int> SabreDEHybridRouter::create_identity_mapping() const {
+    std::vector<int> initial_mapping(num_qubits, -1);
+    for (int lq = 0; lq < num_qubits; ++lq) {
+        if (lq < static_cast<int>(topo.qubits.size())) {
+            initial_mapping[lq] = lq;
+        }
+    }
+    return initial_mapping;
+}
+
+std::vector<int> SabreDEHybridRouter::create_degree_based_mapping() const {
+    std::vector<int> initial_mapping(num_qubits, -1);
+    int p_cnt = topo.qubits.size();
+
+    // 1. Oblicz stopnie (liczbę sąsiadów) dla kubitów fizycznych
+    std::vector<std::pair<int, int>> phys_degrees(p_cnt);
+    for (int p = 0; p < p_cnt; ++p) {
+        int degree = 0;
+        for (int r : topo.qubits[p].connected_resonators) {
+            // Ile innych kubitów jest podłączonych do tego rezonatora
+            degree += topo.resonators[r].connected_qubits.size() - 1;
+        }
+        phys_degrees[p] = {degree, p};
+    }
+    // Sortuj malejąco po stopniu skomunikowania
+    std::sort(phys_degrees.rbegin(), phys_degrees.rend());
+
+    // 2. Oblicz stopnie dla kubitów logicznych (na podstawie obwodu)
+    std::vector<std::pair<int, int>> logical_degrees(num_qubits);
+    for (int lq = 0; lq < num_qubits; ++lq) {
+        logical_degrees[lq] = {0, lq};
+    }
+    for (const auto& gate : original_circuit) {
+        if (gate.type != "1Q") { // Liczą się tylko interakcje 2-kubitowe
+            logical_degrees[gate.target_q1].first++;
+            logical_degrees[gate.target_q2].first++;
+        }
+    }
+    // Sortuj malejąco po liczbie interakcji w obwodzie
+    std::sort(logical_degrees.rbegin(), logical_degrees.rend());
+
+    // 3. Mapuj najbardziej aktywne kubity logiczne na najlepiej połączone fizyczne
+    for (int i = 0; i < num_qubits && i < p_cnt; ++i) {
+        initial_mapping[logical_degrees[i].second] = phys_degrees[i].second;
+    }
+
+    return initial_mapping;
+}
 
 std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
     std::vector<int> best_pre_final_mapping;
     double best_score = std::numeric_limits<double>::max();
     int best_trial = 1;
 
-    std::cout << "[Hybryda 3.0] SABRE sprawdza losowe ustawienia startowe: " << sabre_seed_trials << "\n";
+    std::cout << "[Hybryda 3.0] SABRE sprawdza ustawienia startowe (Identycznościowe, Degree-based, Losowe): " << sabre_seed_trials << "\n";
 
     for (int trial = 0; trial < sabre_seed_trials; ++trial) {
-        std::vector<int> initial_mapping = create_random_initial_mapping();
+        std::vector<int> initial_mapping;
 
-        // Tak jak w czystym SABRE: losowy start -> forward -> backward -> final forward.
+        // Kaskadowy wybór strategii inicjalizacji
+        if (trial == 0) {
+            initial_mapping = create_identity_mapping();
+        } else if (trial == 1) {
+            initial_mapping = create_degree_based_mapping();
+        } else if (trial == 3) {
+            initial_mapping = create_time_decay_mapping();
+        } else {
+            initial_mapping = create_random_initial_mapping();
+        }
+
+        // Standardowy przebieg SABRE: przód -> tył -> docelowy przód
         std::vector<int> post_forward_mapping = run_sabre_pass(dag, initial_mapping, false, nullptr);
         std::vector<int> pre_final_mapping = run_sabre_pass(reversed_dag, post_forward_mapping, false, nullptr);
 
@@ -1831,14 +1890,16 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
         }
     }
 
-    std::cout << "[Hybryda 3.0] Najlepsze ustawienie SABRE: proba " << best_trial
-              << " / " << sabre_seed_trials << ", koszt: " << best_score << "\n";
+    // Dodatkowy print pomagający zdiagnozować, która strategia wygrała
+    std::string winning_strategy = (best_trial == 1) ? "Identycznościowe" :
+                                   (best_trial == 2) ? "Degree-based" : "Losowe";
 
-    // Buforowanie wyznaczonego mapowania logiczny -> fizyczny dla silnika DE.
+    std::cout << "[Hybryda 3.0] Najlepsze ustawienie SABRE: " << winning_strategy
+              << " (próba " << best_trial << " / " << sabre_seed_trials << "), koszt: " << best_score << "\n";
+
     saved_initial_l2p.assign(topo.qubits.size(), -1);
     cache_initial_mapping(best_pre_final_mapping, saved_initial_l2p);
 
-    // Finalny forward dla najlepszego ustawienia generuje priorytety bramek dla genów DE.
     std::vector<int> logical_exec_order;
     run_sabre_pass(dag, best_pre_final_mapping, true, &logical_exec_order);
 
@@ -2169,7 +2230,7 @@ bool SabreDEHybridRouter::de_naive_route_step(
             double f_norm = ctx.ws.f_locs.empty() ? 0 : (sF / ctx.ws.f_locs.size());
 
             // Mutacja wprowadzająca czynnik losowy z algorytmu DE
-            double mutation = 0.95 + (genes[u % n_gates] * 0.1);
+            double mutation = 0.95 + (genes[u % n_gates] * 0.15);
 
             // Wynik opiera się na f_norm i karach (decay)
             double score = f_norm * fast_max_hyb(decay[u], decay[v]) * mutation;
@@ -2429,7 +2490,7 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     int max_logical_depth = *std::max_element(q_depth.begin(), q_depth.end());
 
     // Liczymy identyczny koszt fitness w celu bezpośredniego porównania
-    double final_score = (total_routing_cost * 100.0) + (out_swaps * 500.0) + (max_physical_time * 0.1) + (max_logical_depth * 0.05);
+    double final_score = (total_routing_cost * 10.0) + (out_swaps * 500.0) + (max_physical_time * 0.1) + (max_logical_depth * 0.05);
 
     std::cout << "\n============================================================\n";
     std::cout << "=== FINALNA EWALUACJA PROFILU QISKIT SABRE NA MODELU IQM ===\n";
