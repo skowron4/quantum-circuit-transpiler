@@ -230,7 +230,7 @@ class QiskitCppBridge:
         export_data = []
 
         for gate_id, instr in enumerate(qc.data):
-            qubits = [qc.find_bit(q).index for q in instr.qubits]
+            qubits = [qc.qubits.index(q) for q in instr.qubits]
             gate_type = "1Q" if len(qubits) == 1 else "2Q"
 
             export_data.append({
@@ -365,7 +365,7 @@ class QiskitCppBridge:
         export_data = []
 
         for gate_id, instr in enumerate(qc.data):
-            qubits = [qc.find_bit(q).index for q in instr.qubits]
+            qubits = [qc.qubits.index(q) for q in instr.qubits]
             gate_type = "1Q" if len(qubits) == 1 else "2Q"
 
             export_data.append({
@@ -382,7 +382,7 @@ class QiskitCppBridge:
         export_data = []
 
         for gate_id, instr in enumerate(qc.data):
-            qubits = [qc.find_bit(q).index for q in instr.qubits]
+            qubits = [qc.qubits.index(q) for q in instr.qubits]
             op_name = instr.operation.name.lower()
 
             if op_name == "swap":

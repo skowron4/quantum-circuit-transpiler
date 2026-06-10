@@ -912,7 +912,7 @@ inline void SabreDEHybridRouter::extract_max_metrics(const DERunContext& ctx, do
 }
 
 inline double SabreDEHybridRouter::calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth) {
-    return (routing_cost * 100.0) + (swaps * 314.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
+    return (routing_cost * 100.0) + (swaps * 500.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
 }
 
 // --- GŁÓWNA FUNKCJA ---
@@ -1787,6 +1787,166 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
 // ==============================================================================
 // "Look-ahead/Look-back" pass
 // ==============================================================================
+std::vector<int> SabreDEHybridRouter::create_time_decay_mapping() const {
+    int p_cnt = topo.qubits.size();
+
+    // ---------------------------------------------------------
+    // KROK 1: Obliczenie głębokości (warstw) dla każdej bramki
+    // ---------------------------------------------------------
+    std::vector<int> gate_layer(original_circuit.size(), 0);
+    std::vector<int> q_depth(num_qubits, 0);
+
+    for (size_t i = 0; i < original_circuit.size(); ++i) {
+        const auto& g = original_circuit[i];
+        int l1 = g.target_q1;
+        int l2 = g.target_q2;
+
+        if (g.type == "1Q") {
+            gate_layer[i] = q_depth[l1];
+            q_depth[l1]++;
+        } else {
+            int layer = std::max(q_depth[l1], q_depth[l2]);
+            gate_layer[i] = layer;
+            q_depth[l1] = layer + 1;
+            q_depth[l2] = layer + 1;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // KROK 2: Budowa Ważonego Grafu Interakcji (Time-decay W_ij)
+    // ---------------------------------------------------------
+    const double ALPHA = 0.8; // Współczynnik zaniku (1.0 = brak zaniku, im mniej tym silniejsza preferencja początku)
+    std::vector<std::vector<double>> W(num_qubits, std::vector<double>(num_qubits, 0.0));
+
+    for (size_t i = 0; i < original_circuit.size(); ++i) {
+        const auto& g = original_circuit[i];
+        if (g.type != "1Q") {
+            int u = g.target_q1;
+            int v = g.target_q2;
+            // Interakcje na początku obwodu ważą najwięcej
+            double weight = std::pow(ALPHA, gate_layer[i]);
+            W[u][v] += weight;
+            W[v][u] += weight;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // KROK 3: Wybór "Nasiona" (Najcięższa krawędź logiczna -> Najlepsza krawędź fizyczna)
+    // ---------------------------------------------------------
+    int best_u = -1, best_v = -1;
+    double max_w = -1.0;
+
+    for (int i = 0; i < num_qubits; ++i) {
+        for (int j = i + 1; j < num_qubits; ++j) {
+            if (W[i][j] > max_w) {
+                max_w = W[i][j];
+                best_u = i;
+                best_v = j;
+            }
+        }
+    }
+
+    // Zabezpieczenie: jeśli obwód nie ma bramek 2-kubitowych
+    if (best_u == -1) return create_identity_mapping();
+
+    // Szukamy najlepszej fizycznej pary (najwięcej połączeń z resztą sprzętu)
+    std::vector<int> p_degree(p_cnt, 0);
+    for (int p = 0; p < p_cnt; ++p) {
+        for (int r : topo.qubits[p].connected_resonators) {
+            p_degree[p] += topo.resonators[r].connected_qubits.size() - 1;
+        }
+    }
+
+    int best_p1 = -1, best_p2 = -1;
+    int max_deg_sum = -1;
+
+    // Iterujemy po wszystkich parach fizycznych połączonych jednym rezonatorem
+    for (int p = 0; p < p_cnt; ++p) {
+        for (int r : topo.qubits[p].connected_resonators) {
+            for (int nb : topo.resonators[r].connected_qubits) {
+                if (nb != p) {
+                    int deg_sum = p_degree[p] + p_degree[nb];
+                    if (deg_sum > max_deg_sum) {
+                        max_deg_sum = deg_sum;
+                        best_p1 = p;
+                        best_p2 = nb;
+                    }
+                }
+            }
+        }
+    }
+
+    // Inicjalizacja stanu
+    std::vector<int> mapping(num_qubits, -1);
+    std::vector<bool> p_used(p_cnt, false);
+    std::vector<bool> l_mapped(num_qubits, false);
+
+    mapping[best_u] = best_p1; p_used[best_p1] = true; l_mapped[best_u] = true;
+    mapping[best_v] = best_p2; p_used[best_p2] = true; l_mapped[best_v] = true;
+
+    // ---------------------------------------------------------
+    // KROK 4: Zachłanny Wzrost Podgrafu (Greedy Growth)
+    // ---------------------------------------------------------
+    int mapped_count = 2;
+    while (mapped_count < num_qubits) {
+
+        // 4A: Wybierz logiczny kubit, który najsilniej rozmawia z JUZ PRZYPISANYMI kubitami
+        int next_lq = -1;
+        double best_lq_score = -1.0;
+
+        for (int i = 0; i < num_qubits; ++i) {
+            if (l_mapped[i]) continue;
+            double score = 0.0;
+            for (int j = 0; j < num_qubits; ++j) {
+                if (l_mapped[j]) score += W[i][j];
+            }
+            if (score > best_lq_score) {
+                best_lq_score = score;
+                next_lq = i;
+            }
+        }
+
+        // Zabezpieczenie na wypadek niespójnych/odciętych grafów (np. kubit w ogóle nie bierze udziału w operacjach)
+        if (best_lq_score == 0.0 || next_lq == -1) {
+            for (int i = 0; i < num_qubits; ++i) {
+                if (!l_mapped[i]) { next_lq = i; break; }
+            }
+        }
+
+        // 4B: Wybierz fizyczny kubit, który minimalizuje dystans (ważony) do przypisanych sąsiadów
+        int best_pq = -1;
+        double min_pq_cost = std::numeric_limits<double>::max();
+
+        for (int p = 0; p < p_cnt; ++p) {
+            if (p_used[p]) continue;
+
+            double cost = 0.0;
+            for (int j = 0; j < num_qubits; ++j) {
+                if (l_mapped[j] && W[next_lq][j] > 0) {
+                    cost += W[next_lq][j] * get_distance(p, mapping[j]);
+                }
+            }
+
+            // Tie-breaker: jeśli odległości są równe, wybierz fizyczny kubit o większej liczbie połączeń (lepiej rokuje na przyszłość)
+            double tie_breaker = p_degree[p] * 0.001;
+            double total_score = cost - tie_breaker;
+
+            if (total_score < min_pq_cost) {
+                min_pq_cost = total_score;
+                best_pq = p;
+            }
+        }
+
+        // Zatwierdzenie przypisania
+        mapping[next_lq] = best_pq;
+        p_used[best_pq] = true;
+        l_mapped[next_lq] = true;
+        mapped_count++;
+    }
+
+    return mapping;
+}
+
 std::vector<int> SabreDEHybridRouter::create_random_initial_mapping() {
     std::vector<int> physical_qubits(topo.qubits.size());
     std::iota(physical_qubits.begin(), physical_qubits.end(), 0);
@@ -1855,7 +2015,7 @@ std::vector<int> SabreDEHybridRouter::create_degree_based_mapping() const {
     return initial_mapping;
 }
 
-std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
+std::vector<int> SabreDEHybridRouter::prepare_sabre_seed(bool can_lazy, int n_genes, int blocks) {
     std::vector<int> best_pre_final_mapping;
     double best_score = std::numeric_limits<double>::max();
     int best_trial = 1;
@@ -1870,7 +2030,7 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed() {
             initial_mapping = create_identity_mapping();
         } else if (trial == 1) {
             initial_mapping = create_degree_based_mapping();
-        } else if (trial == 3) {
+        } else if (trial == 2) {
             initial_mapping = create_time_decay_mapping();
         } else {
             initial_mapping = create_random_initial_mapping();
@@ -2404,10 +2564,16 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
 
             // Szukamy wspólnego rezonatora sprzętowego
             int chosen_res = -1;
+            double best_r_time = std::numeric_limits<double>::max();
+
             for (int r : topo.qubits[p1].connected_resonators) {
                 const auto& p2_res = topo.qubits[p2].connected_resonators;
                 if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
-                    chosen_res = r; break;
+                    // Wybieramy rezonator, który najszybciej będzie wolny
+                    if (r_time[r] < best_r_time) {
+                        best_r_time = r_time[r];
+                        chosen_res = r;
+                    }
                 }
             }
 
@@ -2455,10 +2621,16 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
             int p2 = g.target_q2;
 
             int chosen_res = -1;
+            double best_r_time = std::numeric_limits<double>::max();
+
             for (int r : topo.qubits[p1].connected_resonators) {
                 const auto& p2_res = topo.qubits[p2].connected_resonators;
                 if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
-                    chosen_res = r; break;
+                    // Wybieramy rezonator, który najszybciej będzie wolny
+                    if (r_time[r] < best_r_time) {
+                        best_r_time = r_time[r];
+                        chosen_res = r;
+                    }
                 }
             }
 

@@ -240,7 +240,7 @@ private:
                                int& max_logical_depth, std::vector<RoutingRecord>* out_log);
 
     std::vector<int> prepare_sabre_seed(bool can_lazy, int n_genes, int blocks);
-    std::vector<int> create_time_mapping() const;
+    std::vector<int> create_time_decay_mapping() const;
     std::vector<int> create_identity_mapping() const;
     std::vector<int> create_degree_based_mapping() const;
     void initialize_de_population(int pop_size, int n_genes, int n_gates, int blocks, const std::vector<int>& logical_exec_order, std::vector<double>& pop, std::vector<double>& fitness, boost::random::xoshiro256pp& rng, bool can_lazy);

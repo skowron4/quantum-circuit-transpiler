@@ -340,19 +340,18 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
     const SabreDAG& current_dag,
     const MachineState& state,
     const std::vector<int>& front_layer,
-    const std::vector<std::vector<int>>& lookahead_layers, // Przekazujemy zebrany lookahead
+    const std::vector<std::vector<int>>& lookahead_layers,
     const std::vector<int>& active_phys_qubits,
     const std::vector<double>& decay,
-    int max_lookahead_depth,       // [ZMIENNA STERUJĄCA] Ile warstw w głąb analizujemy
-    double lookahead_weight_base, // Podstawowa waga dla warstw rozszerzonych
-    double lookahead_decay_rate   // [ZMIENNA STERUJĄCA] Jak szybko waga spada z głębokością
+    int max_lookahead_depth,
+    double lookahead_weight_base,
+    double lookahead_decay_rate
 ) const {
 
     int p_cnt = topo.qubits.size();
     std::vector<uint8_t> seen_pairs(p_cnt * p_cnt, 0);
 
     // --- 1. PREKALKULACJA I FILTROWANIE PAR ---
-    // Pobieramy bazowe ułożenie tylko RAZ
     const auto& current_l2p = state.logical_to_phys_qubit;
 
     double base_score_F = 0.0;
@@ -362,13 +361,11 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
     for (int gate_id : front_layer) {
         const GateNode& n = current_dag.nodes[gate_id];
         if (n.lq2 != -1) {
-            front_pairs.push_back({n.lq1, n.lq2, 1.0}); // Front layer ma zawsze wagę 1.0
+            front_pairs.push_back({n.lq1, n.lq2, 1.0});
             base_score_F += get_distance(current_l2p[n.lq1], current_l2p[n.lq2]);
         }
     }
-    double f_norm_base = front_pairs.empty() ? 0 : (base_score_F / front_pairs.size());
 
-    // Agregujemy warstwy lookahead w jedną płaską listę, ale z zanikającą wagą
     double base_score_E = 0.0;
     double total_e_weight = 0.0;
     std::vector<LogicalPair> ext_pairs;
@@ -385,12 +382,10 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
                 total_e_weight += current_layer_weight;
             }
         }
-        current_layer_weight *= lookahead_decay_rate; // Spadek wagi dla głębszych warstw
+        current_layer_weight *= lookahead_decay_rate;
     }
-    double e_norm_base = ext_pairs.empty() ? 0 : (base_score_E / total_e_weight);
 
-
-    // --- 2. EWALUACJA DELTA (O(k) zamiast O(N)) ---
+    // --- 2. EWALUACJA DELTA ---
     SwapCandidate best_candidate = {-1, -1, -1, std::numeric_limits<double>::max()};
     std::uniform_real_distribution<double> jitter_dist(0.0, 1e-6);
 
@@ -409,21 +404,16 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
             int lq_p = state.phys_qubit_to_logical[p];
             int lq_neighbor = state.phys_qubit_to_logical[neighbor_p];
 
-            // Jeśli wymieniamy dwa puste kubity fizyczne - ignorujemy (bezużyteczne)
             if (lq_p == -1 && lq_neighbor == -1) continue;
 
-            // Zmienne na akumulację zmian (Delta)
             double delta_F = 0.0;
             double delta_E = 0.0;
 
-            // Ewaluacja Front Layer (tylko wpływowe bramki!)
             for (const auto& pr : front_pairs) {
-                // Czy ten SWAP wpływa na tę konkretną bramkę?
                 if (pr.lq1 == lq_p || pr.lq2 == lq_p || pr.lq1 == lq_neighbor || pr.lq2 == lq_neighbor) {
                     int old_u = current_l2p[pr.lq1];
                     int old_v = current_l2p[pr.lq2];
 
-                    // Wyznaczamy nowe lokacje O(1) bez faktycznego zmieniania wektora
                     int new_u = (pr.lq1 == lq_p) ? neighbor_p : ((pr.lq1 == lq_neighbor) ? p : old_u);
                     int new_v = (pr.lq2 == lq_p) ? neighbor_p : ((pr.lq2 == lq_neighbor) ? p : old_v);
 
@@ -431,7 +421,6 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
                 }
             }
 
-            // Ewaluacja Lookahead (Extended) Layer
             for (const auto& pr : ext_pairs) {
                 if (pr.lq1 == lq_p || pr.lq2 == lq_p || pr.lq1 == lq_neighbor || pr.lq2 == lq_neighbor) {
                     int old_u = current_l2p[pr.lq1];
@@ -440,36 +429,27 @@ SwapCandidate SabreRouter::find_best_swap_candidate(
                     int new_u = (pr.lq1 == lq_p) ? neighbor_p : ((pr.lq1 == lq_neighbor) ? p : old_u);
                     int new_v = (pr.lq2 == lq_p) ? neighbor_p : ((pr.lq2 == lq_neighbor) ? p : old_v);
 
-                    // Pamiętamy o przemnożeniu przez wagę warstwy!
                     delta_E += pr.weight * (get_distance(new_u, new_v) - get_distance(old_u, old_v));
                 }
             }
 
             // --- 3. OBLICZANIE WYNIKU KOŃCOWEGO ---
-            // Zamiast score = suma_wszystkiego, robimy score = baza + delta
             double f_norm_new = front_pairs.empty() ? 0 : ((base_score_F + delta_F) / front_pairs.size());
             double e_norm_new = ext_pairs.empty() ? 0 : ((base_score_E + delta_E) / total_e_weight);
 
-            // Baza dystansu (im mniejsza, tym lepszy wynik heurystyki)
             double dist_score = (f_norm_new + EXTENDED_LAYER_WEIGHT * e_norm_new);
 
-            // ZMIANA 2: Faworyzowanie operacji MOVE nad SWAP
-            // Rozpoznajemy, czy ruch na tej krawędzi to de facto MOVE (transfer na pusty kubit)
             bool is_move = (lq_p == -1 || lq_neighbor == -1);
 
-            // Wymuszamy, by algorytm wolał "tani" MOVE. Jeśli to kosztowny SWAP,
-            // sztucznie pogarszamy jego wynik, mnożąc go przez karę operacyjną.
-            double op_penalty = is_move ? 1.0 : (SWAP_COST / (2.0 * MOVE_COST));
+            // NAPRAWA: Zmieniona kara za SWAP na minimalny tie-breaker (1.01).
+            // Zapobiega to nieskończonym pętlom, faworyzując nadal operacje MOVE,
+            // ale nie blokując przybliżania się do celu.
+            double op_penalty = is_move ? 1.0 : 1.01;
 
-            // Finalny wynik bazujący na odległości, karze za typ operacji i karze za częstotliwość (decay)
             double score = dist_score * op_penalty * fast_max_sabre(decay[u], decay[v]);
 
-            // Drobny tie-breaker dla zdarzeń o identycznym wyniku (wybiera szybsze wykonanie w czasie)
             double time_tie_breaker = 0.0001 * fast_max_sabre(state.q_ready_time[u], state.q_ready_time[v]);
             score += time_tie_breaker;
-
-            // Klasyczny SABRE zwykle odpala wiele losowych prób. Tu dodajemy mikroskopijny
-            // jitter, żeby remisy i prawie-remisy nie były zawsze rozstrzygane kolejnością krawędzi.
             score += jitter_dist(rng);
 
             if (score < best_candidate.score) {
