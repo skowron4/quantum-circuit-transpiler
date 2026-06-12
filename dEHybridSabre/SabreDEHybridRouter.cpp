@@ -46,6 +46,16 @@ void SabreDEHybridRouter::set_sabre_seed_trials(int trials) {
     sabre_seed_trials = std::max(1, trials);
 }
 
+void SabreDEHybridRouter::set_fixed_initial_mapping(const std::vector<int>& initial_l2p) {
+    forced_initial_l2p = initial_l2p;
+    has_forced_initial_mapping = true;
+}
+
+void SabreDEHybridRouter::clear_fixed_initial_mapping() {
+    forced_initial_l2p.clear();
+    has_forced_initial_mapping = false;
+}
+
 inline void SabreDEHybridRouter::init_distance_cache() {
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
@@ -2154,6 +2164,33 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed(bool can_lazy, int n_ge
     int d_s = 0, d_m = 0, d_d = 0;
     double d_t = 0.0;
 
+    if (has_forced_initial_mapping) {
+        std::cout << "[Hybryda 3.0] Uzywam sztywnego layoutu startowego przekazanego z eksperymentu.\n";
+
+        saved_initial_l2p.assign(topo.qubits.size(), -1);
+        cache_initial_mapping(forced_initial_l2p, saved_initial_l2p);
+
+        SabreSeedProfile fixed_profile;
+        fixed_profile.resonator_choice_index.assign(dag.nodes.size(), -1);
+        fixed_profile.resonator_choice_count.assign(dag.nodes.size(), 0);
+        fixed_profile.q1_goes_in.assign(dag.nodes.size(), -1);
+
+        double fixed_sabre_score = 0.0;
+        run_sabre_pass(dag, forced_initial_l2p, true, &fixed_profile, &fixed_sabre_score, false);
+
+        std::vector<double> fixed_genes = generate_sabre_base_genes(n_genes, dag.nodes.size(), blocks, fixed_profile, sabre_rng);
+        double fixed_de_score = evaluate_fitness(fixed_genes.data(), d_s, d_m, d_t, d_d, nullptr, can_lazy);
+
+        sabre_seed_profile = std::move(fixed_profile);
+        sabre_seed_profile_bank.clear();
+        sabre_seed_profile_bank.push_back(sabre_seed_profile);
+
+        std::cout << "[Hybryda 3.0] Sztywny layout: koszt SABRE=" << fixed_sabre_score
+                  << ", DE-score seeda=" << fixed_de_score << "\n";
+
+        return sabre_seed_profile.logical_exec_order;
+    }
+
     std::cout << "[Hybryda 3.0] SABRE sprawdza ustawienia startowe (Identycznościowe, Degree-based, Time-decay, Losowe): " << sabre_seed_trials << "\n";
 
     for (int trial = 0; trial < sabre_seed_trials; ++trial) {
@@ -2698,7 +2735,15 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     int p_cnt = topo.qubits.size();
     int r_cnt = topo.resonators.size();
 
-    // Rejestry stanu maszyny fizycznej (czyste, bo Qiskit operuje na ID fizycznych)
+    // Qiskitowy SABRE zwraca operacje na fizycznych przewodach. Po SWAP-ach
+    // trzeba jednak śledzić, który kubit logiczny aktualnie siedzi na danym przewodzie.
+    std::vector<int> p2l(p_cnt, -1);
+    std::vector<int> l2p(std::max(num_qubits, p_cnt), -1);
+    for (int p = 0; p < p_cnt && p < num_qubits; ++p) {
+        p2l[p] = p;
+        l2p[p] = p;
+    }
+
     std::vector<int> q_on_res(p_cnt, -1);
     std::vector<int> res_occ(r_cnt, -1);
     std::vector<double> q_time(p_cnt, 0.0);
@@ -2710,13 +2755,30 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     double total_routing_cost = 0.0;
     std::vector<RoutingRecord> final_log;
 
-    // Lambda: Wymuszenie zejścia fizycznego kubitu z rezonatora (Automatyczny MOVE)
+    auto find_shared_resonator = [&](int p1, int p2) {
+        int chosen_res = -1;
+        double best_r_time = std::numeric_limits<double>::max();
+        const auto& p2_res = topo.qubits[p2].connected_resonators;
+
+        for (int r : topo.qubits[p1].connected_resonators) {
+            if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end() && r_time[r] < best_r_time) {
+                best_r_time = r_time[r];
+                chosen_res = r;
+            }
+        }
+
+        return chosen_res;
+    };
+
+    // Wymuszenie zejścia fizycznego przewodu z rezonatora. Logujemy także logiczny
+    // kubit po aktualnej permutacji Qiskitowych SWAP-ów.
     auto force_down = [&](int p) {
         int r = q_on_res[p];
         if (r == -1) return;
 
+        int lq = (p >= 0 && p < static_cast<int>(p2l.size())) ? p2l[p] : -1;
         double start = fast_max_hyb(q_time[p], r_time[r]);
-        final_log.push_back({OpType::MOVE, -1, -1, -1, r + RES_OFFSET, p, -1, start});
+        final_log.push_back({OpType::MOVE, -1, lq, -1, r + RES_OFFSET, p, -1, start});
 
         out_moves++;
         total_routing_cost += MOVE_COST;
@@ -2735,7 +2797,8 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
             int p1 = g.target_q1;
             force_down(p1); // Musi zejść na węzeł, żeby wykonać 1Q
 
-            final_log.push_back({OpType::GATE_1Q, g.id, -1, -1, p1, -1, -1, q_time[p1]});
+            int lq = (p1 >= 0 && p1 < static_cast<int>(p2l.size())) ? p2l[p1] : -1;
+            final_log.push_back({OpType::GATE_1Q, g.id, lq, -1, p1, -1, -1, q_time[p1]});
             q_time[p1] += 1.0;
             q_depth[p1]++;
         }
@@ -2744,20 +2807,7 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
             int p1 = g.target_q1;
             int p2 = g.target_q2;
 
-            // Szukamy wspólnego rezonatora sprzętowego
-            int chosen_res = -1;
-            double best_r_time = std::numeric_limits<double>::max();
-
-            for (int r : topo.qubits[p1].connected_resonators) {
-                const auto& p2_res = topo.qubits[p2].connected_resonators;
-                if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
-                    // Wybieramy rezonator, który najszybciej będzie wolny
-                    if (r_time[r] < best_r_time) {
-                        best_r_time = r_time[r];
-                        chosen_res = r;
-                    }
-                }
-            }
+            int chosen_res = find_shared_resonator(p1, p2);
 
             if (chosen_res == -1) {
                 std::cerr << "[BŁĄD WALIDACJI QISKITA] Próba wykonania 2Q na niesąsiadujących kubitach: " << p1 << " i " << p2 << "\n";
@@ -2779,7 +2829,8 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
                 force_down(p_in);
                 start_time = fast_max_hyb(q_time[p_in], fast_max_hyb(q_time[p_stay], r_time[chosen_res]));
 
-                final_log.push_back({OpType::MOVE, g.id, -1, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
+                int lq_in = (p_in >= 0 && p_in < static_cast<int>(p2l.size())) ? p2l[p_in] : -1;
+                final_log.push_back({OpType::MOVE, g.id, lq_in, -1, p_in, chosen_res + RES_OFFSET, -1, start_time});
                 out_moves++;
                 total_routing_cost += MOVE_COST;
                 start_time += MOVE_COST;
@@ -2791,7 +2842,9 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
                 start_time = fast_max_hyb(q_time[p_in], fast_max_hyb(q_time[p_stay], r_time[chosen_res]));
             }
 
-            final_log.push_back({OpType::GATE_2Q_LOCAL, g.id, -1, -1, chosen_res + RES_OFFSET, p_stay, -1, start_time});
+            int lq_in = (p_in >= 0 && p_in < static_cast<int>(p2l.size())) ? p2l[p_in] : -1;
+            int lq_stay = (p_stay >= 0 && p_stay < static_cast<int>(p2l.size())) ? p2l[p_stay] : -1;
+            final_log.push_back({OpType::GATE_2Q_LOCAL, g.id, lq_in, lq_stay, chosen_res + RES_OFFSET, p_stay, -1, start_time});
             q_time[p_in] = q_time[p_stay] = r_time[chosen_res] = start_time + 1.0;
 
             int max_d = fast_max_hyb(q_depth[p_in], q_depth[p_stay]);
@@ -2802,38 +2855,34 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
             int p1 = g.target_q1;
             int p2 = g.target_q2;
 
-            int chosen_res = -1;
-            double best_r_time = std::numeric_limits<double>::max();
-
-            for (int r : topo.qubits[p1].connected_resonators) {
-                const auto& p2_res = topo.qubits[p2].connected_resonators;
-                if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
-                    // Wybieramy rezonator, który najszybciej będzie wolny
-                    if (r_time[r] < best_r_time) {
-                        best_r_time = r_time[r];
-                        chosen_res = r;
-                    }
-                }
+            int chosen_res = find_shared_resonator(p1, p2);
+            if (chosen_res == -1) {
+                std::cerr << "[BŁĄD WALIDACJI QISKITA] Próba wykonania SWAP na niesąsiadujących kubitach: " << p1 << " i " << p2 << "\n";
+                continue;
             }
 
             // Wykonujemy fizyczny SWAP na architekturze magistrali rezonatorowej
             force_down(p1);
             force_down(p2);
-            if (chosen_res != -1 && res_occ[chosen_res] != -1) force_down(res_occ[chosen_res]);
+            if (res_occ[chosen_res] != -1) force_down(res_occ[chosen_res]);
 
-            // Dodatkowe zabezpieczenie: jeśli nie połączone rezonatorem, start time max dla kubitów
-            double r_time_val = (chosen_res != -1) ? r_time[chosen_res] : 0.0;
-            double start_time = fast_max_hyb(q_time[p1], fast_max_hyb(q_time[p2], r_time_val));
+            double start_time = fast_max_hyb(q_time[p1], fast_max_hyb(q_time[p2], r_time[chosen_res]));
+            int lq1 = p2l[p1];
+            int lq2 = p2l[p2];
 
-            final_log.push_back({OpType::SWAP, -1, -1, -1, p1, p2, chosen_res, start_time});
+            final_log.push_back({OpType::SWAP, g.id, lq1, lq2, p1, p2, chosen_res, start_time});
             out_swaps++;
             total_routing_cost += SWAP_COST;
 
             q_time[p1] = q_time[p2] = start_time + SWAP_COST;
-            if (chosen_res != -1) r_time[chosen_res] = start_time + SWAP_COST;
+            r_time[chosen_res] = start_time + SWAP_COST;
 
             int max_d = fast_max_hyb(q_depth[p1], q_depth[p2]) + 1;
             q_depth[p1] = q_depth[p2] = max_d;
+
+            std::swap(p2l[p1], p2l[p2]);
+            if (lq1 != -1) l2p[lq1] = p2;
+            if (lq2 != -1) l2p[lq2] = p1;
         }
     }
 
@@ -2843,8 +2892,8 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     double max_physical_time = *std::max_element(q_time.begin(), q_time.end());
     int max_logical_depth = *std::max_element(q_depth.begin(), q_depth.end());
 
-    // Liczymy identyczny koszt fitness w celu bezpośredniego porównania
-    double final_score = (total_routing_cost * 10.0) + (out_swaps * 500.0) + (max_physical_time * 0.1) + (max_logical_depth * 0.05);
+    // Liczymy tę samą funkcję fitness, której używa hybryda, żeby CSV było porównywalne.
+    double final_score = calculate_fitness_score(total_routing_cost, out_swaps, out_moves, max_physical_time, max_logical_depth);
 
     std::cout << "\n============================================================\n";
     std::cout << "=== FINALNA EWALUACJA PROFILU QISKIT SABRE NA MODELU IQM ===\n";

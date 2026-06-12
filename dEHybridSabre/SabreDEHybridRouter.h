@@ -199,6 +199,8 @@ private:
     HybridSabreDAG reversed_dag;
     HybridWorkspace workspace;
     std::vector<int> saved_initial_l2p;
+    bool has_forced_initial_mapping = false;
+    std::vector<int> forced_initial_l2p;
     SabreSeedProfile sabre_seed_profile;
     std::vector<SabreSeedProfile> sabre_seed_profile_bank;
 
@@ -330,6 +332,8 @@ public:
 
     void set_random_seed(uint64_t seed);
     void set_sabre_seed_trials(int trials);
+    void set_fixed_initial_mapping(const std::vector<int>& initial_l2p);
+    void clear_fixed_initial_mapping();
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
     OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.9, double cr = 0.9);
     OptimizationResult optimize_windowed_with_feedback(

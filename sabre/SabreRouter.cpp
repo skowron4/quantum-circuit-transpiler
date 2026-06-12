@@ -715,6 +715,31 @@ SabreBenchmarkResult SabreRouter::run_benchmark(bool print_details) {
     return result;
 }
 
+std::vector<int> SabreRouter::compute_bidirectional_initial_mapping(const std::vector<int>& initial_l2p, bool print_details) {
+    std::vector<int> post_forward_mapping = run_pass(dag, initial_l2p, false, print_details).mapping;
+    return run_pass(reversed_dag, post_forward_mapping, false, print_details).mapping;
+}
+
+SabreBenchmarkResult SabreRouter::run_benchmark_with_initial_mapping(const std::vector<int>& initial_l2p, bool print_details) {
+    if (print_details) {
+        std::cout << "Uruchamiam benchmark SABRE ze sztywnym layoutem startowym... " << std::endl;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+    SabreBenchmarkResult result = run_pass(dag, initial_l2p, true, print_details).benchmark;
+
+    auto end_time = std::chrono::steady_clock::now();
+    std::chrono::duration<double> execution_time = end_time - start_time;
+    result.execution_time = execution_time.count();
+
+    if (print_details) {
+        std::cout << "Czas wykonania routingu ze sztywnym layoutem: " << execution_time.count() << " sekund" << std::endl;
+        std::cout << "=========================================================\n" << std::endl;
+    }
+
+    return result;
+}
+
 void SabreRouter::run_benchmark_multiple(int num_runs) {
     if (num_runs <= 0) {
         std::cout << "Liczba uruchomien SABRE musi byc dodatnia.\n";

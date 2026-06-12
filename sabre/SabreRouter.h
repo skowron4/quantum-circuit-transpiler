@@ -54,6 +54,8 @@ public:
     SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth = 20);
 
     SabreBenchmarkResult run_benchmark(bool print_details = true);
+    SabreBenchmarkResult run_benchmark_with_initial_mapping(const std::vector<int>& initial_l2p, bool print_details = true);
+    std::vector<int> compute_bidirectional_initial_mapping(const std::vector<int>& initial_l2p, bool print_details = false);
     void run_benchmark_multiple(int num_runs = 30);
     void set_random_seed(uint32_t seed);
 
