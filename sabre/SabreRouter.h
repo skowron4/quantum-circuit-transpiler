@@ -51,7 +51,7 @@ struct stockSwapEdge {
 
 class SabreRouter {
 public:
-    SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name);
+    SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth = 20);
 
     SabreBenchmarkResult run_benchmark(bool print_details = true);
     void run_benchmark_multiple(int num_runs = 30);
@@ -74,6 +74,7 @@ private:
     std::vector<Gate> original_circuit;
     int num_qubits;
     std::string name;
+    int max_look_ahead_depth;
 
     mutable std::vector<int> dist_cache;
     mutable std::mt19937 rng;
@@ -111,7 +112,7 @@ private:
     const std::vector<std::vector<int>>& lookahead_layers,
     const std::vector<int>& active_phys_qubits,
     const std::vector<double>& decay,
-    int max_lookahead_depth = 5,
+    int max_lookahead_depth,
     double lookahead_weight_base = 0.5,
     double lookahead_decay_rate = 0.5
 ) const;

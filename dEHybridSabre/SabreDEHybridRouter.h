@@ -142,6 +142,11 @@ struct SabreSeedProfile {
     std::vector<int> resonator_choice_index;
     std::vector<int> resonator_choice_count;
     std::vector<int> q1_goes_in;
+    double sabre_score = std::numeric_limits<double>::max();
+    double sabre_makespan = 0.0;
+    int sabre_depth = 0;
+    int sabre_swaps = 0;
+    int sabre_moves = 0;
 };
 
 // Kontekst dla ewaluacji DE oparty o pre-alokowany workspace
@@ -195,6 +200,7 @@ private:
     HybridWorkspace workspace;
     std::vector<int> saved_initial_l2p;
     SabreSeedProfile sabre_seed_profile;
+    std::vector<SabreSeedProfile> sabre_seed_profile_bank;
 
     // --- Metody Bazowe ---
     int get_distance_old(int p1, int p2) const;
@@ -206,11 +212,11 @@ private:
 
     // --- Metody Pomocnicze SABRE ---
     std::vector<int> run_sabre_pass(const HybridSabreDAG& current_dag, const std::vector<int>& initial_l2p, bool is_final, SabreSeedProfile* out_seed_profile, double* out_routing_cost = nullptr, bool print_details = true);
-    void sabre_force_qubit_down(int p, int current_gate_id, SabreRunContext& ctx);
+    void sabre_force_qubit_down(int& p, int current_gate_id, SabreRunContext& ctx, bool allow_relocation = false, const HybridSabreDAG* current_dag = nullptr, const std::vector<int>* front_layer = nullptr);
     void sabre_execute_gates(const HybridSabreDAG& current_dag, std::vector<int>& executable_gates, std::vector<int>& front_layer, std::vector<int>& deps, SabreRunContext& ctx, SabreSeedProfile* out_seed_profile);
     bool sabre_route_step(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const std::vector<std::vector<int>>& lookahead_layers, SabreRunContext& ctx);
     inline void sabre_execute_1q_gate(const HybridGateNode& node, int p1, SabreRunContext& ctx);
-    inline void sabre_execute_2q_gate(const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx, SabreSeedProfile* out_seed_profile);
+    inline void sabre_execute_2q_gate(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, const HybridGateNode& node, int p1, int p2, SabreRunContext& ctx, SabreSeedProfile* out_seed_profile);
     inline void extract_sabre_executables(const HybridSabreDAG& current_dag, std::vector<int>& front_layer, std::vector<int>& executable_gates, SabreRunContext& ctx);
     inline void build_sabre_lookahead(const HybridSabreDAG& current_dag, const std::vector<int>& front_layer, std::vector<std::vector<int>>& lookahead_layers, std::vector<bool>& in_extended);
     std::vector<int> create_random_initial_mapping();
@@ -320,7 +326,7 @@ private:
     OptimizationResult finalize_optimization_result(const std::vector<double>& pop, int best_idx, int n_genes, bool can_lazy, std::chrono::time_point<std::chrono::high_resolution_clock> start_time);
 
 public:
-    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow = false, int max_look_ahead_depth = 1);
+    SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow = false, int max_look_ahead_depth = 20);
 
     void set_random_seed(uint64_t seed);
     void set_sabre_seed_trials(int trials);

@@ -6,8 +6,9 @@
 
 #include "dEHybridSabre/SabreDEHybridRouter.h"
 
-SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name)
-    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)), rng(std::random_device{}()) {
+SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth)
+    : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)),
+      max_look_ahead_depth(std::max(1, max_look_ahead_depth)), rng(std::random_device{}()) {
 
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
@@ -621,14 +622,13 @@ SabreRouter::SabrePassResult SabreRouter::run_pass(const SabreDAG& current_dag, 
         }
 
         // 2. Budowanie wielowarstwowego Lookaheada (zastępuje extended_layer)
-        const int MAX_LOOKAHEAD = 20; // Ile warstw w głąb DAG-a sprawdzamy
         std::vector<std::vector<int>> lookahead_layers;
-        lookahead_layers.reserve(MAX_LOOKAHEAD);
+        lookahead_layers.reserve(max_look_ahead_depth);
 
         std::fill(in_extended.begin(), in_extended.end(), 0); // Reset odwiedzin
         std::vector<int> current_level = front_layer;
 
-        for (int d = 0; d < MAX_LOOKAHEAD; ++d) {
+        for (int d = 0; d < max_look_ahead_depth; ++d) {
             std::vector<int> next_level;
             for (int gate_id : current_level) {
                 for (int nxt : current_dag.nodes[gate_id].next_gates) {
@@ -645,7 +645,7 @@ SabreRouter::SabrePassResult SabreRouter::run_pass(const SabreDAG& current_dag, 
 
         // 3. Wywołanie nowej, zoptymalizowanej heurystyki szukającej SWAP/MOVE
         SwapCandidate best_candidate = find_best_swap_candidate(
-            current_dag, state, front_layer, lookahead_layers, active_phys_qubits, decay
+            current_dag, state, front_layer, lookahead_layers, active_phys_qubits, decay, max_look_ahead_depth
         );
 
         if (best_candidate.p1 != -1) {
