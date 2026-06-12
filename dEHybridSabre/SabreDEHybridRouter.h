@@ -20,6 +20,7 @@
 struct OptimizationResult {
     double score;
     double makespan;
+    double execution_time = 0.0;
     int depth;
     int swaps;
     int moves;

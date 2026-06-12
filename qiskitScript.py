@@ -225,6 +225,56 @@ class QiskitCppBridge:
     def __init__(self):
         self.num_qubits = 0
 
+    def _layout_to_l2p(self, layout, logical_qubits: int):
+        if layout is None:
+            return []
+
+        l2p = [-1] * logical_qubits
+
+        try:
+            virtual_bits = layout.get_virtual_bits()
+            for virtual_bit, physical_idx in virtual_bits.items():
+                logical_idx = getattr(virtual_bit, "index", None)
+                if logical_idx is None:
+                    logical_idx = getattr(virtual_bit, "_index", None)
+                if logical_idx is not None and 0 <= logical_idx < logical_qubits:
+                    l2p[logical_idx] = int(physical_idx)
+            return l2p
+        except Exception:
+            pass
+
+        try:
+            physical_bits = layout.get_physical_bits()
+            for physical_idx, virtual_bit in physical_bits.items():
+                logical_idx = getattr(virtual_bit, "index", None)
+                if logical_idx is None:
+                    logical_idx = getattr(virtual_bit, "_index", None)
+                if logical_idx is not None and 0 <= logical_idx < logical_qubits:
+                    l2p[logical_idx] = int(physical_idx)
+            return l2p
+        except Exception:
+            return []
+
+    def _transpile_layout_metadata(self, qc: QuantumCircuit):
+        layout_info = getattr(qc, "layout", None)
+        if layout_info is None:
+            return {}
+
+        initial_layout = getattr(layout_info, "initial_layout", None)
+        final_layout = getattr(layout_info, "final_layout", None)
+        logical_qubits = len(getattr(initial_layout, "get_virtual_bits", lambda: {})()) if initial_layout is not None else qc.num_qubits
+
+        metadata = {}
+        initial_l2p = self._layout_to_l2p(initial_layout, logical_qubits)
+        if initial_l2p:
+            metadata["qiskit_initial_layout_l2p"] = initial_l2p
+
+        final_l2p = self._layout_to_l2p(final_layout, logical_qubits)
+        if final_l2p:
+            metadata["qiskit_final_layout_l2p"] = final_l2p
+
+        return metadata
+
     def export_to_cpp(self, qc: QuantumCircuit, filename: str):
         self.num_qubits = qc.num_qubits
         export_data = []
@@ -239,8 +289,15 @@ class QiskitCppBridge:
                 "qubits": qubits
             })
 
+        metadata = self._transpile_layout_metadata(qc)
+        logical_qubits = len(metadata.get("qiskit_initial_layout_l2p", [])) or self.num_qubits
         with open(filename, "w") as f:
-            json.dump({"num_qubits": self.num_qubits, "gates": export_data}, f, indent=4)
+            json.dump({
+                "num_qubits": self.num_qubits,
+                "logical_qubits": logical_qubits,
+                **metadata,
+                "gates": export_data
+            }, f, indent=4)
 
 
 # --- TOPOLOGIA IQM CONSTELLATION ---
@@ -360,6 +417,56 @@ class QiskitCppBridge:
     def __init__(self):
         self.num_qubits = 0
 
+    def _layout_to_l2p(self, layout, logical_qubits: int):
+        if layout is None:
+            return []
+
+        l2p = [-1] * logical_qubits
+
+        try:
+            virtual_bits = layout.get_virtual_bits()
+            for virtual_bit, physical_idx in virtual_bits.items():
+                logical_idx = getattr(virtual_bit, "index", None)
+                if logical_idx is None:
+                    logical_idx = getattr(virtual_bit, "_index", None)
+                if logical_idx is not None and 0 <= logical_idx < logical_qubits:
+                    l2p[logical_idx] = int(physical_idx)
+            return l2p
+        except Exception:
+            pass
+
+        try:
+            physical_bits = layout.get_physical_bits()
+            for physical_idx, virtual_bit in physical_bits.items():
+                logical_idx = getattr(virtual_bit, "index", None)
+                if logical_idx is None:
+                    logical_idx = getattr(virtual_bit, "_index", None)
+                if logical_idx is not None and 0 <= logical_idx < logical_qubits:
+                    l2p[logical_idx] = int(physical_idx)
+            return l2p
+        except Exception:
+            return []
+
+    def _transpile_layout_metadata(self, qc: QuantumCircuit):
+        layout_info = getattr(qc, "layout", None)
+        if layout_info is None:
+            return {}
+
+        initial_layout = getattr(layout_info, "initial_layout", None)
+        final_layout = getattr(layout_info, "final_layout", None)
+        logical_qubits = len(getattr(initial_layout, "get_virtual_bits", lambda: {})()) if initial_layout is not None else qc.num_qubits
+
+        metadata = {}
+        initial_l2p = self._layout_to_l2p(initial_layout, logical_qubits)
+        if initial_l2p:
+            metadata["qiskit_initial_layout_l2p"] = initial_l2p
+
+        final_l2p = self._layout_to_l2p(final_layout, logical_qubits)
+        if final_l2p:
+            metadata["qiskit_final_layout_l2p"] = final_l2p
+
+        return metadata
+
     def export_to_cpp(self, qc: QuantumCircuit, filename: str):
         self.num_qubits = qc.num_qubits
         export_data = []
@@ -374,8 +481,15 @@ class QiskitCppBridge:
                 "qubits": qubits
             })
 
+        metadata = self._transpile_layout_metadata(qc)
+        logical_qubits = len(metadata.get("qiskit_initial_layout_l2p", [])) or self.num_qubits
         with open(filename, "w") as f:
-            json.dump({"num_qubits": self.num_qubits, "gates": export_data}, f, indent=4)
+            json.dump({
+                "num_qubits": self.num_qubits,
+                "logical_qubits": logical_qubits,
+                **metadata,
+                "gates": export_data
+            }, f, indent=4)
 
     def export_transpiled_to_cpp(self, qc: QuantumCircuit, filename: str):
         self.num_qubits = qc.num_qubits

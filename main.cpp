@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -362,13 +363,26 @@ struct HybridRunParams {
 struct ExperimentConfig {
     std::filesystem::path input_dir = "../iqm_benchmarks";
     std::filesystem::path results_dir = "../results";
-    int deterministic_runs = 3;
+    int deterministic_runs = 10;
     int random_pilot_layouts = 8;
-    int random_tuning_instances = 2;
+    int random_tuning_instances_per_bucket = 2;
     int min_random_layouts = 5;
     int max_random_layouts = 40;
     double random_target_relative_error = 0.10;
+    int hyperparam_training_instances_per_bucket = 3;
+    int hyperparam_training_runs = 2;
+    double hyperparam_time_penalty = 0.02;
     uint64_t base_seed = 1337;
+};
+
+struct CircuitMeta {
+    std::filesystem::path path;
+    std::string circuit_id;
+    std::string topology_bucket;
+    std::string size_bucket;
+    std::string training_bucket;
+    int logical_qubits = 0;
+    int gate_count = 0;
 };
 
 struct LayoutCandidate {
@@ -438,30 +452,113 @@ static std::unique_ptr<BaseTopology> make_topology_for_qubits(int logical_qubits
     return topology;
 }
 
-static HybridRunParams choose_hybrid_params(int gate_count, int logical_qubits) {
-    HybridRunParams params;
+static std::string size_bucket_for_gates(int gate_count) {
+    if (gate_count <= 500) return "gates_le_500";
+    if (gate_count <= 2000) return "gates_le_2000";
+    if (gate_count <= 8000) return "gates_le_8000";
+    return "gates_gt_8000";
+}
 
-    if (gate_count <= 250 || logical_qubits <= 8) {
-        params.profile = "small_fast";
-        params.pop_size = 20;
-        params.generations_per_window = 100;
-        params.window_size = std::max(80, std::min(250, gate_count));
-        params.accept_ratio = 0.60;
-    } else if (gate_count <= 1500) {
-        params.profile = "medium_balanced";
-        params.pop_size = 30;
-        params.generations_per_window = 180;
-        params.window_size = std::max(250, std::min(700, gate_count / 2));
-        params.accept_ratio = 0.70;
-    } else {
-        params.profile = "large_windowed";
-        params.pop_size = 36;
-        params.generations_per_window = 140;
-        params.window_size = std::max(700, std::min(1800, gate_count / 3));
-        params.accept_ratio = 0.75;
+static int constellation_dimension_for_qubits(int logical_qubits) {
+    int dim = 2;
+    auto topology = std::make_unique<IQMConstellation>(dim, dim);
+    while (topology->get_num_qubits() < logical_qubits) {
+        ++dim;
+        topology = std::make_unique<IQMConstellation>(dim, dim);
+    }
+    return dim;
+}
+
+static std::string topology_bucket_for_qubits(int logical_qubits) {
+    if (logical_qubits <= 13) return "triangle";
+
+    int dim = constellation_dimension_for_qubits(logical_qubits);
+    if (dim <= 2) return "grid_2x2";
+    if (dim <= 4) return "grid_3x3_4x4";
+    return "grid_5x5_plus";
+}
+
+static std::string training_bucket_for(int logical_qubits, int gate_count) {
+    return topology_bucket_for_qubits(logical_qubits) + "__" + size_bucket_for_gates(gate_count);
+}
+
+static HybridRunParams fallback_hybrid_params(int gate_count, int logical_qubits) {
+    HybridRunParams params;
+    params.profile = "fallback_" + training_bucket_for(logical_qubits, gate_count);
+    params.lazy_offboard = true;
+    params.window_size = std::clamp(gate_count / 2, 50, 16000);
+    params.window_size = std::max(50, std::min(params.window_size, gate_count));
+    return params;
+}
+
+static std::vector<int> window_candidates_for_gate_count(int gate_count) {
+    std::vector<int> base = {50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000};
+    std::vector<int> candidates;
+    for (int value : base) {
+        if (value <= gate_count) candidates.push_back(value);
+    }
+    candidates.push_back(std::max(50, std::min(gate_count, gate_count / 2)));
+    candidates.push_back(std::max(50, std::min(gate_count, gate_count)));
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    return candidates;
+}
+
+static std::vector<HybridRunParams> build_hyperparameter_candidates(int gate_count, int logical_qubits, int physical_qubits) {
+    std::vector<HybridRunParams> candidates;
+    const bool lazy = logical_qubits < physical_qubits;
+
+    std::vector<int> pops = {10, 20, 30, 40, 50};
+    std::vector<int> generations = {100, 250, 500, 1000};
+    std::vector<double> fs = {0.1, 0.3, 0.5, 0.7, 0.9};
+    std::vector<double> crs = {0.1, 0.3, 0.5, 0.7, 0.9};
+    std::vector<double> accepts = {0.35, 0.5, 0.7, 0.9, 1.0};
+    std::vector<int> depths = {0, 2, 4, 6, 8, 10};
+    std::vector<int> windows = window_candidates_for_gate_count(gate_count);
+
+    auto add_candidate = [&](int idx, int pop, int gen, int window, double accept, double f, double cr, int depth, const std::string& tag) {
+        HybridRunParams params;
+        params.pop_size = pop;
+        params.generations_per_window = gen;
+        params.window_size = std::max(50, std::min(window, gate_count));
+        params.accept_ratio = accept;
+        params.lazy_offboard = lazy;
+        params.f = f;
+        params.cr = cr;
+        params.lookahead_depth = depth;
+        params.profile = training_bucket_for(logical_qubits, gate_count) + "_" + tag + "_" + std::to_string(idx);
+        candidates.push_back(params);
+    };
+
+    int idx = 0;
+    for (size_t i = 0; i < pops.size(); ++i) {
+        int window = windows[std::min(i, windows.size() - 1)];
+        add_candidate(idx++, pops[i], generations[i % generations.size()], window,
+                      accepts[(i + 2) % accepts.size()], fs[i], crs[(i + 1) % crs.size()],
+                      depths[(i + 1) % depths.size()], "pop_sweep");
     }
 
-    return params;
+    for (size_t i = 0; i < generations.size(); ++i) {
+        int window = windows[std::min(windows.size() - 1, i + 1)];
+        add_candidate(idx++, 30, generations[i], window, accepts[i % accepts.size()],
+                      fs[(i + 2) % fs.size()], crs[(i + 3) % crs.size()],
+                      depths[(i + 2) % depths.size()], "gen_sweep");
+    }
+
+    for (size_t i = 0; i < windows.size(); ++i) {
+        add_candidate(idx++, 30, gate_count <= 500 ? 500 : 250, windows[i],
+                      accepts[i % accepts.size()], fs[(i + 1) % fs.size()],
+                      crs[(i + 2) % crs.size()], depths[i % depths.size()], "window_sweep");
+    }
+
+    for (size_t i = 0; i < accepts.size(); ++i) {
+        int window = windows[windows.size() / 2];
+        add_candidate(idx++, 40, gate_count <= 500 ? 500 : 250, window, accepts[i],
+                      fs[i], crs[crs.size() - 1 - i], depths[(i + 3) % depths.size()],
+                      "control_sweep");
+    }
+
+    return candidates;
 }
 
 static bool validate_mapping(const std::vector<int>& mapping, int logical_qubits, int physical_qubits) {
@@ -616,6 +713,62 @@ static int estimate_random_layout_count(const std::vector<double>& pilot_scores,
     return std::clamp(count, config.min_random_layouts, config.max_random_layouts);
 }
 
+static std::filesystem::path qiskit_routed_path_for_base(const std::filesystem::path& base_path) {
+    return base_path.parent_path() / (base_path.stem().string() + "_qiskit_routed" + base_path.extension().string());
+}
+
+static std::vector<int> derive_qiskit_layout_from_routed_file(const std::filesystem::path& routed_path, int logical_qubits, int physical_qubits) {
+    std::ifstream file(routed_path);
+    if (file.is_open()) {
+        try {
+            nlohmann::json j;
+            file >> j;
+            if (j.contains("qiskit_initial_layout_l2p") && j["qiskit_initial_layout_l2p"].is_array()) {
+                std::vector<int> layout(logical_qubits, -1);
+                const auto& json_layout = j["qiskit_initial_layout_l2p"];
+                for (int lq = 0; lq < logical_qubits && lq < static_cast<int>(json_layout.size()); ++lq) {
+                    layout[lq] = json_layout[lq].get<int>();
+                }
+                if (validate_mapping(layout, logical_qubits, physical_qubits)) {
+                    return layout;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Ostrzezenie: nie udalo sie odczytac initial_layout Qiskita z " << routed_path
+                      << ": " << e.what() << "\n";
+        }
+    }
+
+    // Fallback dla starych plikow bez metadanych: daje layout koncowy wynikajacy
+    // z jawnych SWAP w eksporcie, a nie prawdziwy initial_layout Qiskita.
+    int routed_qubits = 0;
+    std::vector<Gate> routed_circuit = CircuitIO::load_circuitII(routed_path.string(), routed_qubits);
+    std::vector<int> p2l(physical_qubits, -1);
+    for (int p = 0; p < physical_qubits && p < logical_qubits; ++p) {
+        p2l[p] = p;
+    }
+
+    for (const auto& gate : routed_circuit) {
+        if (gate.type == "SWAP" &&
+            gate.target_q1 >= 0 && gate.target_q1 < physical_qubits &&
+            gate.target_q2 >= 0 && gate.target_q2 < physical_qubits) {
+            std::swap(p2l[gate.target_q1], p2l[gate.target_q2]);
+        }
+    }
+
+    std::vector<int> l2p(logical_qubits, -1);
+    for (int p = 0; p < physical_qubits; ++p) {
+        int lq = p2l[p];
+        if (lq >= 0 && lq < logical_qubits) l2p[lq] = p;
+    }
+
+    for (int lq = 0; lq < logical_qubits; ++lq) {
+        if (l2p[lq] == -1) l2p[lq] = lq;
+    }
+
+    return l2p;
+}
+
 static void write_layout_row(CsvWriter& writer, const std::string& circuit_id, const std::string& topology_name,
                              int logical_qubits, int gate_count, const LayoutCandidate& layout) {
     writer.out << CsvWriter::escape(circuit_id) << ','
@@ -656,6 +809,7 @@ static void write_result_row(CsvWriter& writer, const std::string& circuit_id, c
                << params.lookahead_depth << ','
                << result.score << ','
                << result.makespan << ','
+               << result.execution_time << ','
                << result.depth << ','
                << result.swaps << ','
                << result.moves << "\n";
@@ -663,13 +817,195 @@ static void write_result_row(CsvWriter& writer, const std::string& circuit_id, c
 
 static OptimizationResult to_optimization_result(const SabreBenchmarkResult& result) {
     double comparable_score = result.score + (result.makespan * 0.001) + (result.depth * 0.0005);
-    return {comparable_score, result.makespan, result.depth, result.swaps, result.moves};
+    return {comparable_score, result.makespan, result.execution_time, result.depth, result.swaps, result.moves};
+}
+
+static CircuitMeta make_circuit_meta(const std::filesystem::path& input_file) {
+    int logical_qubits = 0;
+    std::vector<Gate> circuit = CircuitIO::load_circuitII(input_file.string(), logical_qubits);
+    CircuitMeta meta;
+    meta.path = input_file;
+    meta.circuit_id = circuit_family_from_path(input_file);
+    meta.logical_qubits = logical_qubits;
+    meta.gate_count = static_cast<int>(circuit.size());
+    meta.topology_bucket = topology_bucket_for_qubits(logical_qubits);
+    meta.size_bucket = size_bucket_for_gates(meta.gate_count);
+    meta.training_bucket = meta.topology_bucket + "__" + meta.size_bucket;
+    return meta;
+}
+
+static std::map<std::string, std::vector<CircuitMeta>> select_training_circuits(
+    const std::vector<CircuitMeta>& base_circuits,
+    const ExperimentConfig& config
+) {
+    std::map<std::string, std::vector<CircuitMeta>> buckets;
+
+    for (const auto& meta : base_circuits) {
+        buckets[meta.training_bucket].push_back(meta);
+    }
+
+    std::map<std::string, std::vector<CircuitMeta>> selected;
+    for (auto& [bucket_name, metas] : buckets) {
+        std::mt19937_64 rng(config.base_seed + static_cast<uint64_t>(std::hash<std::string>{}(bucket_name)));
+        std::shuffle(metas.begin(), metas.end(), rng);
+
+        int take = std::min(config.hyperparam_training_instances_per_bucket, static_cast<int>(metas.size()));
+        selected[bucket_name].insert(selected[bucket_name].end(), metas.begin(), metas.begin() + take);
+    }
+
+    return selected;
+}
+
+static double tuning_objective(const OptimizationResult& result, const ExperimentConfig& config) {
+    return result.score * (1.0 + config.hyperparam_time_penalty * std::log1p(std::max(0.0, result.execution_time)));
+}
+
+static void write_hyperparam_row(CsvWriter& writer, const std::string& bucket, const CircuitMeta& meta,
+                                 const HybridRunParams& params, int candidate_id, int run_id,
+                                 uint64_t seed, const OptimizationResult& result,
+                                 double objective, bool selected) {
+    writer.out << CsvWriter::escape(bucket) << ','
+               << CsvWriter::escape(meta.circuit_id) << ','
+               << CsvWriter::escape(meta.path.string()) << ','
+               << meta.logical_qubits << ','
+               << meta.gate_count << ','
+               << candidate_id << ','
+               << CsvWriter::escape(params.profile) << ','
+               << params.pop_size << ','
+               << params.generations_per_window << ','
+               << params.window_size << ','
+               << params.accept_ratio << ','
+               << params.lazy_offboard << ','
+               << params.f << ','
+               << params.cr << ','
+               << params.lookahead_depth << ','
+               << run_id << ','
+               << seed << ','
+               << result.score << ','
+               << result.makespan << ','
+               << result.execution_time << ','
+               << result.depth << ','
+               << result.swaps << ','
+               << result.moves << ','
+               << objective << ','
+               << selected << "\n";
+}
+
+static HybridRunParams clamp_params_to_circuit(HybridRunParams params, int gate_count, int logical_qubits, int physical_qubits) {
+    params.window_size = std::max(50, std::min(params.window_size, std::max(50, gate_count)));
+    params.lazy_offboard = logical_qubits < physical_qubits;
+    return params;
+}
+
+static std::map<std::string, HybridRunParams> tune_hyperparameters(
+    const std::map<std::string, std::vector<CircuitMeta>>& training_circuits,
+    const ExperimentConfig& config,
+    CsvWriter& tuning_csv
+) {
+    std::map<std::string, HybridRunParams> best_params_by_bucket;
+
+    for (const auto& [bucket_name, metas] : training_circuits) {
+        if (metas.empty()) continue;
+
+        int representative_gate_count = metas.front().gate_count;
+        int representative_logical_qubits = metas.front().logical_qubits;
+        std::string topology_name;
+        auto representative_topology = make_topology_for_qubits(representative_logical_qubits, topology_name);
+        std::vector<HybridRunParams> candidates = build_hyperparameter_candidates(
+            representative_gate_count,
+            representative_logical_qubits,
+            representative_topology->get_num_qubits()
+        );
+
+        double best_mean_objective = std::numeric_limits<double>::max();
+        int best_candidate_id = -1;
+        HybridRunParams best_params = fallback_hybrid_params(representative_gate_count, representative_logical_qubits);
+        std::vector<std::tuple<CircuitMeta, HybridRunParams, int, int, uint64_t, OptimizationResult, double>> buffered_rows;
+
+        for (int candidate_id = 0; candidate_id < static_cast<int>(candidates.size()); ++candidate_id) {
+            double objective_sum = 0.0;
+            int objective_count = 0;
+
+            for (const auto& meta : metas) {
+                int logical_qubits = 0;
+                std::vector<Gate> circuit = CircuitIO::load_circuitII(meta.path.string(), logical_qubits);
+                if (circuit.empty()) continue;
+
+                std::string local_topology_name;
+                auto topology = make_topology_for_qubits(logical_qubits, local_topology_name);
+                HybridRunParams params = clamp_params_to_circuit(
+                    candidates[candidate_id],
+                    static_cast<int>(circuit.size()),
+                    logical_qubits,
+                    topology->get_num_qubits()
+                );
+
+                std::vector<int> compact_layout = make_compact_layout(*topology, circuit, logical_qubits);
+                for (int run = 0; run < config.hyperparam_training_runs; ++run) {
+                    uint64_t seed = config.base_seed + static_cast<uint64_t>(candidate_id * 10000 + run);
+                    SabreDEHybridRouter hybrid(*topology, circuit, logical_qubits, local_topology_name, false, params.lookahead_depth);
+                    hybrid.set_random_seed(seed);
+                    hybrid.set_sabre_seed_trials(1);
+                    hybrid.set_fixed_initial_mapping(compact_layout);
+
+                    OptimizationResult result = hybrid.optimize_windowed(
+                        params.pop_size,
+                        params.generations_per_window,
+                        params.window_size,
+                        params.accept_ratio,
+                        params.lazy_offboard,
+                        params.f,
+                        params.cr
+                    );
+
+                    double objective = tuning_objective(result, config);
+                    objective_sum += objective;
+                    objective_count++;
+                    buffered_rows.push_back({meta, params, candidate_id, run, seed, result, objective});
+                }
+            }
+
+            if (objective_count > 0) {
+                double mean_objective = objective_sum / static_cast<double>(objective_count);
+                if (mean_objective < best_mean_objective) {
+                    best_mean_objective = mean_objective;
+                    best_candidate_id = candidate_id;
+                    best_params = candidates[candidate_id];
+                    best_params.profile = bucket_name + "_best_candidate_" + std::to_string(candidate_id);
+                }
+            }
+        }
+
+        for (const auto& row : buffered_rows) {
+            const auto& meta = std::get<0>(row);
+            const auto& params = std::get<1>(row);
+            int candidate_id = std::get<2>(row);
+            int run = std::get<3>(row);
+            uint64_t seed = std::get<4>(row);
+            const auto& result = std::get<5>(row);
+            double objective = std::get<6>(row);
+            write_hyperparam_row(tuning_csv, bucket_name, meta, params, candidate_id, run, seed, result, objective, candidate_id == best_candidate_id);
+        }
+
+        best_params_by_bucket[bucket_name] = best_params;
+    }
+
+    return best_params_by_bucket;
+}
+
+static HybridRunParams params_for_circuit(const std::map<std::string, HybridRunParams>& learned_params,
+                                          int gate_count, int logical_qubits, int physical_qubits) {
+    std::string bucket = training_bucket_for(logical_qubits, gate_count);
+    auto it = learned_params.find(bucket);
+    HybridRunParams params = (it == learned_params.end()) ? fallback_hybrid_params(gate_count, logical_qubits) : it->second;
+    return clamp_params_to_circuit(params, gate_count, logical_qubits, physical_qubits);
 }
 
 static std::vector<LayoutCandidate> build_layout_suite(const BaseTopology& topology, const std::vector<Gate>& circuit,
                                                        int logical_qubits, const ExperimentConfig& config,
                                                        int random_layout_count, uint64_t circuit_seed,
-                                                       const std::string& topology_name) {
+                                                       const std::string& topology_name,
+                                                       const std::filesystem::path& base_circuit_path) {
     std::vector<LayoutCandidate> layouts;
 
     auto add_layout = [&](std::string strategy, int layout_id, uint64_t seed, std::vector<int> mapping) {
@@ -683,9 +1019,11 @@ static std::vector<LayoutCandidate> build_layout_suite(const BaseTopology& topol
     std::vector<int> identity = make_identity_layout(logical_qubits, topology.get_num_qubits());
     add_layout("identity_trivial", 0, config.base_seed, identity);
 
-    SabreRouter sabre_layout_proxy(topology, circuit, logical_qubits, topology_name, 20);
-    sabre_layout_proxy.set_random_seed(static_cast<uint32_t>(circuit_seed));
-    add_layout("sabre_layout_proxy_qiskit", 0, circuit_seed, sabre_layout_proxy.compute_bidirectional_initial_mapping(identity, false));
+    std::filesystem::path qiskit_path = qiskit_routed_path_for_base(base_circuit_path);
+    if (std::filesystem::exists(qiskit_path)) {
+        add_layout("qiskit_sabre_initial_layout", 0, circuit_seed + 31,
+                   derive_qiskit_layout_from_routed_file(qiskit_path, logical_qubits, topology.get_num_qubits()));
+    }
 
     add_layout("compact_connectivity", 0, circuit_seed + 17, make_compact_layout(topology, circuit, logical_qubits));
 
@@ -699,6 +1037,7 @@ static std::vector<LayoutCandidate> build_layout_suite(const BaseTopology& topol
 }
 
 static void process_qiskit_routed_file(const std::filesystem::path& input_file, const ExperimentConfig& config,
+                                       const std::map<std::string, HybridRunParams>& learned_params,
                                        CsvWriter& results_csv) {
     int logical_qubits = 0;
     std::vector<Gate> qiskit_circuit = CircuitIO::load_circuitII(input_file.string(), logical_qubits);
@@ -706,7 +1045,7 @@ static void process_qiskit_routed_file(const std::filesystem::path& input_file, 
 
     std::string topology_name;
     auto topology = make_topology_for_qubits(logical_qubits, topology_name);
-    HybridRunParams params = choose_hybrid_params(static_cast<int>(qiskit_circuit.size()), logical_qubits);
+    HybridRunParams params = params_for_circuit(learned_params, static_cast<int>(qiskit_circuit.size()), logical_qubits, topology->get_num_qubits());
 
     SabreDEHybridRouter evaluator(*topology, qiskit_circuit, logical_qubits, "qiskit_eval", false, params.lookahead_depth);
     evaluator.set_random_seed(config.base_seed);
@@ -720,8 +1059,10 @@ static void process_qiskit_routed_file(const std::filesystem::path& input_file, 
 }
 
 static void process_base_circuit_file(const std::filesystem::path& input_file, const ExperimentConfig& config,
+                                      const std::map<std::string, HybridRunParams>& learned_params,
                                       CsvWriter& results_csv, CsvWriter& layouts_csv, CsvWriter& tuning_csv,
-                                      int& tuned_instances_done, int& random_layout_count) {
+                                      std::map<std::string, int>& random_tuned_instances_by_bucket,
+                                      std::map<std::string, int>& random_layout_count_by_bucket) {
     int logical_qubits = 0;
     std::vector<Gate> circuit = CircuitIO::load_circuitII(input_file.string(), logical_qubits);
     if (circuit.empty()) return;
@@ -729,14 +1070,19 @@ static void process_base_circuit_file(const std::filesystem::path& input_file, c
     std::string topology_name;
     auto topology = make_topology_for_qubits(logical_qubits, topology_name);
     std::string circuit_id = circuit_family_from_path(input_file);
+    std::string bucket = training_bucket_for(logical_qubits, static_cast<int>(circuit.size()));
     uint64_t circuit_seed = config.base_seed + static_cast<uint64_t>(std::hash<std::string>{}(circuit_id));
 
-    if (tuned_instances_done < config.random_tuning_instances) {
+    int& tuned_instances_done = random_tuned_instances_by_bucket[bucket];
+    int& random_layout_count = random_layout_count_by_bucket[bucket];
+    if (random_layout_count == 0) random_layout_count = config.min_random_layouts;
+
+    if (tuned_instances_done < config.random_tuning_instances_per_bucket) {
         std::vector<double> pilot_scores;
         for (int i = 0; i < config.random_pilot_layouts; ++i) {
             std::mt19937_64 rng(circuit_seed + 50000 + static_cast<uint64_t>(i));
             auto layout = make_random_layout(logical_qubits, topology->get_num_qubits(), rng);
-            SabreRouter pilot_sabre(*topology, circuit, logical_qubits, topology_name, 4);
+            SabreRouter pilot_sabre(*topology, circuit, logical_qubits, topology_name, 20);
             pilot_sabre.set_random_seed(static_cast<uint32_t>(circuit_seed + 70000 + static_cast<uint64_t>(i)));
             pilot_scores.push_back(to_optimization_result(pilot_sabre.run_benchmark_with_initial_mapping(layout, false)).score);
         }
@@ -751,6 +1097,7 @@ static void process_base_circuit_file(const std::filesystem::path& input_file, c
         double sd = pilot_scores.size() > 1 ? std::sqrt(sq_sum / static_cast<double>(pilot_scores.size() - 1)) : 0.0;
 
         tuning_csv.out << CsvWriter::escape(circuit_id) << ','
+                       << CsvWriter::escape(bucket) << ','
                        << logical_qubits << ','
                        << circuit.size() << ','
                        << config.random_pilot_layouts << ','
@@ -762,9 +1109,9 @@ static void process_base_circuit_file(const std::filesystem::path& input_file, c
         tuned_instances_done++;
     }
 
-    HybridRunParams params = choose_hybrid_params(static_cast<int>(circuit.size()), logical_qubits);
+    HybridRunParams params = params_for_circuit(learned_params, static_cast<int>(circuit.size()), logical_qubits, topology->get_num_qubits());
     std::vector<LayoutCandidate> layouts = build_layout_suite(*topology, circuit, logical_qubits, config,
-                                                              random_layout_count, circuit_seed, topology_name);
+                                                              random_layout_count, circuit_seed, topology_name, input_file);
 
     for (const auto& layout : layouts) {
         write_layout_row(layouts_csv, circuit_id, topology_name, logical_qubits, static_cast<int>(circuit.size()), layout);
@@ -772,12 +1119,16 @@ static void process_base_circuit_file(const std::filesystem::path& input_file, c
         for (int run = 0; run < config.deterministic_runs; ++run) {
             uint64_t run_seed = circuit_seed + static_cast<uint64_t>(run);
 
-            SabreRouter sabre(*topology, circuit, logical_qubits, topology_name, params.lookahead_depth);
+            HybridRunParams sabre_params = params;
+            sabre_params.lookahead_depth = 20;
+            sabre_params.profile = params.profile + "_sabre_lh20";
+
+            SabreRouter sabre(*topology, circuit, logical_qubits, topology_name, 20);
             sabre.set_random_seed(static_cast<uint32_t>(run_seed));
             SabreBenchmarkResult sabre_result = sabre.run_benchmark_with_initial_mapping(layout.l2p, false);
             write_result_row(results_csv, circuit_id, input_file, topology_name, logical_qubits,
                              static_cast<int>(circuit.size()), layout, "sabre_fixed_layout",
-                             run, run_seed, params, to_optimization_result(sabre_result));
+                             run, run_seed, sabre_params, to_optimization_result(sabre_result));
 
             SabreDEHybridRouter hybrid(*topology, circuit, logical_qubits, topology_name, false, params.lookahead_depth);
             hybrid.set_random_seed(run_seed);
@@ -817,7 +1168,7 @@ int main(int argc, char* argv[]) {
 
     CsvWriter results_csv(
         config.results_dir / "routing_runs.csv",
-        "circuit_id,circuit_path,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,router,run_id,run_seed,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,score,makespan,depth,swaps,moves"
+        "circuit_id,circuit_path,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,router,run_id,run_seed,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,score,makespan,execution_time_s,depth,swaps,moves"
     );
     CsvWriter layouts_csv(
         config.results_dir / "layouts.csv",
@@ -825,27 +1176,46 @@ int main(int argc, char* argv[]) {
     );
     CsvWriter tuning_csv(
         config.results_dir / "random_layout_tuning.csv",
-        "circuit_id,logical_qubits,gates,pilot_layouts,mean_score,sd_score,raw_estimated_random_layouts,used_random_layouts,metric"
+        "circuit_id,training_bucket,logical_qubits,gates,pilot_layouts,mean_score,sd_score,raw_estimated_random_layouts,used_random_layouts,metric"
+    );
+    CsvWriter hyperparam_csv(
+        config.results_dir / "hyperparameter_tuning.csv",
+        "training_bucket,circuit_id,circuit_path,logical_qubits,gates,candidate_id,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,run_id,seed,score,makespan,execution_time_s,depth,swaps,moves,objective,selected"
     );
 
-    int tuned_instances_done = 0;
-    int random_layout_count = config.min_random_layouts;
-
     std::vector<std::filesystem::path> files;
+    std::vector<CircuitMeta> base_metas;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(config.input_dir)) {
         if (entry.is_regular_file() && entry.path().extension() == ".json") {
             files.push_back(entry.path());
+            if (!is_routed_qiskit_file(entry.path())) {
+                CircuitMeta meta = make_circuit_meta(entry.path());
+                if (meta.gate_count > 0 && meta.logical_qubits > 0) {
+                    base_metas.push_back(meta);
+                }
+            }
         }
     }
     std::sort(files.begin(), files.end());
+    std::sort(base_metas.begin(), base_metas.end(), [](const CircuitMeta& a, const CircuitMeta& b) {
+        if (a.training_bucket != b.training_bucket) return a.training_bucket < b.training_bucket;
+        if (a.gate_count != b.gate_count) return a.gate_count < b.gate_count;
+        return a.circuit_id < b.circuit_id;
+    });
+
+    auto training_circuits = select_training_circuits(base_metas, config);
+    auto learned_params = tune_hyperparameters(training_circuits, config, hyperparam_csv);
+
+    std::map<std::string, int> random_tuned_instances_by_bucket;
+    std::map<std::string, int> random_layout_count_by_bucket;
 
     for (const auto& input_file : files) {
         std::cout << "\n=> Przetwarzam: " << input_file << "\n";
         if (is_routed_qiskit_file(input_file)) {
-            process_qiskit_routed_file(input_file, config, results_csv);
+            process_qiskit_routed_file(input_file, config, learned_params, results_csv);
         } else {
-            process_base_circuit_file(input_file, config, results_csv, layouts_csv, tuning_csv,
-                                      tuned_instances_done, random_layout_count);
+            process_base_circuit_file(input_file, config, learned_params, results_csv, layouts_csv, tuning_csv,
+                                      random_tuned_instances_by_bucket, random_layout_count_by_bucket);
         }
     }
 

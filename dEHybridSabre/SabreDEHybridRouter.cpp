@@ -23,7 +23,7 @@ constexpr int LAZY_TARGET_BLOCK = 4;
 
 SabreDEHybridRouter::SabreDEHybridRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, bool slow, int max_look_ahead_depth)
     : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)),
-      max_look_ahead_depth(std::max(1, max_look_ahead_depth)), slow(slow), sabre_rng(random_seed)
+      max_look_ahead_depth(std::max(0, max_look_ahead_depth)), slow(slow), sabre_rng(random_seed)
 {
     init_distance_cache();
 
@@ -1340,10 +1340,11 @@ OptimizationResult SabreDEHybridRouter::finalize_optimization_result(const std::
     }
     std::cout << "===================================\n";
 
-    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, std::chrono::duration<double>(end_time - start_time).count());
+    double execution_time = std::chrono::duration<double>(end_time - start_time).count();
+    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, execution_time);
     export_moves_to_file(final_log, "../hybrid_schedule_moves_" + name + ".txt");
 
-    return {final_score, final_makespan, final_depth, final_swaps, final_moves};
+    return {final_score, final_makespan, execution_time, final_depth, final_swaps, final_moves};
 }
 
 // ==============================================================================
@@ -1851,7 +1852,7 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
     std::vector<int> executable_gates;
     executable_gates.reserve(num_qubits);
 
-    const int LOOKAHEAD_DEPTH = std::max(1, max_look_ahead_depth);
+    const int LOOKAHEAD_DEPTH = std::max(0, max_look_ahead_depth);
     std::vector<std::vector<int>> lookahead_layers(LOOKAHEAD_DEPTH);
     std::vector<bool> in_extended(n_gates, false);
 
@@ -2732,6 +2733,7 @@ void SabreDEHybridRouter::export_moves_to_file(const std::vector<RoutingRecord>&
 }
 
 OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit) {
+    auto eval_start_time = std::chrono::high_resolution_clock::now();
     int p_cnt = topo.qubits.size();
     int r_cnt = topo.resonators.size();
 
@@ -2907,7 +2909,9 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
 
     // export_moves_to_file(final_log, "../qiskit_faithful_schedule_" + name + ".txt");
 
-    return {final_score, max_physical_time, max_logical_depth, out_swaps, out_moves};
+    auto eval_end_time = std::chrono::high_resolution_clock::now();
+    double execution_time = std::chrono::duration<double>(eval_end_time - eval_start_time).count();
+    return {final_score, max_physical_time, execution_time, max_logical_depth, out_swaps, out_moves};
 }
 
 void SabreDEHybridRouter::optimize_with_feedback(int pop_size, int generations_per_pass, int feedback_passes, bool allow_lazy_offboard, double f, double cr) {

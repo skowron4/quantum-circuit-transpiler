@@ -8,7 +8,7 @@
 
 SabreRouter::SabreRouter(const BaseTopology& topology, const std::vector<Gate>& circuit, int qubits_cnt, std::string name, int max_look_ahead_depth)
     : topo(topology), original_circuit(circuit), num_qubits(qubits_cnt), name(std::move(name)),
-      max_look_ahead_depth(std::max(1, max_look_ahead_depth)), rng(std::random_device{}()) {
+      max_look_ahead_depth(std::max(0, max_look_ahead_depth)), rng(std::random_device{}()) {
 
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
