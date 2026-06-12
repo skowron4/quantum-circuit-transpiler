@@ -920,7 +920,9 @@ inline void SabreDEHybridRouter::extract_max_metrics(const DERunContext& ctx, do
 }
 
 inline double SabreDEHybridRouter::calculate_fitness_score(double routing_cost, int swaps, int moves, double max_time, int max_depth) {
-    return (routing_cost * 100.0) + (swaps * 500.0) + (moves * 100) + (max_time * 0.1) + (max_depth * 0.05);
+    // return (routing_cost * 10.0) + (swaps * 31.4) + (moves * 10) + (max_time * 0.01) + (max_depth * 0.005);
+    // return (routing_cost * 100.0) + (max_time * 0.1) + (max_depth * 0.05);
+    return (swaps * 5.14) + (moves * 1.0) + (max_time * 0.1) + (max_depth * 0.05);
 }
 
 // --- GŁÓWNA FUNKCJA ---
@@ -1767,7 +1769,8 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
     std::vector<int> executable_gates;
     executable_gates.reserve(num_qubits);
 
-    const int LOOKAHEAD_DEPTH = std::max(1, max_look_ahead_depth);
+    // const int LOOKAHEAD_DEPTH = std::max(1, max_look_ahead_depth);
+    const int LOOKAHEAD_DEPTH = 20;
     std::vector<std::vector<int>> lookahead_layers(LOOKAHEAD_DEPTH);
     std::vector<bool> in_extended(n_gates, false);
 
@@ -2742,4 +2745,252 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     // export_moves_to_file(final_log, "../qiskit_faithful_schedule_" + name + ".txt");
 
     return {final_score, max_physical_time, max_logical_depth, out_swaps, out_moves};
+}
+
+void SabreDEHybridRouter::optimize_with_feedback(int pop_size, int generations_per_pass, int feedback_passes, bool allow_lazy_offboard, double f, double cr) {
+    int n_gates = dag.nodes.size();
+    if (n_gates == 0) return;
+
+    bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
+    int blocks = can_lazy ? 5 : 4;
+    int n_genes = n_gates * blocks;
+
+    auto global_start_time = std::chrono::high_resolution_clock::now();
+    boost::random::xoshiro256pp rng(random_seed);
+
+    // --- PAS 0: Standardowa inicjalizacja heurystyczna ---
+    std::cout << "[Feedback Loop] Uruchamianie fazy wstępnej (Pas 0)...\n";
+    std::vector<int> logical_exec_order = prepare_sabre_seed(can_lazy, n_genes, blocks);
+
+    std::vector<double> pop(pop_size * n_genes), fitness(pop_size);
+    initialize_de_population(pop_size, n_genes, n_gates, blocks, sabre_seed_profile, pop, fitness, rng, can_lazy);
+
+    int best_idx = 0;
+
+    for (int pass = 0; pass <= feedback_passes; ++pass) {
+        if (pass > 0) {
+            std::cout << "\n[Feedback Loop] !!! ROZPOCZYNANIE PASU " << pass << " !!!\n";
+            std::cout << "[Feedback Loop] Wyciąganie układu końcowego z najlepszego rozwiązania poprzedniej generacji...\n";
+
+            // 1. Schwytanie stanu końcowego najlepszego osobnika za pomocą snapshotu
+            DEStateSnapshot final_state;
+            final_state.is_valid = false;
+            final_state.target_gates_routed = n_gates; // Interesuje nas sam koniec obwodu
+
+            int dummy_s, dummy_m, dummy_d; double dummy_t;
+            evaluate_fitness_impl<false>(
+                pop.data() + best_idx * n_genes, dummy_s, dummy_m, dummy_t, dummy_d,
+                nullptr, can_lazy, nullptr, &final_state
+            );
+
+            if (final_state.is_valid) {
+                // 2. Look-back pass: Przepuszczamy DE-final_mapping wstecz przez reversed_dag
+                std::vector<int> de_final_mapping = final_state.l2p;
+                std::vector<int> new_initial_mapping = run_sabre_pass(reversed_dag, de_final_mapping, false, nullptr);
+
+                // 3. Aktualizacja globalnego punktu startowego dla silnika DE
+                saved_initial_l2p.assign(topo.qubits.size(), -1);
+                for (size_t i = 0; i < new_initial_mapping.size(); ++i) {
+                    saved_initial_l2p[i] = new_initial_mapping[i];
+                }
+
+                // 4. Regeneracja profilu ziarna (SABRE Seed) dopasowanego do nowego mapowania
+                SabreSeedProfile refined_profile;
+                refined_profile.resonator_choice_index.assign(n_gates, -1);
+                refined_profile.resonator_choice_count.assign(n_gates, 0);
+                refined_profile.q1_goes_in.assign(n_gates, -1);
+
+                run_sabre_pass(dag, new_initial_mapping, true, &refined_profile, nullptr, false);
+                sabre_seed_profile = std::move(refined_profile);
+
+                std::cout << "[Feedback Loop] Nowy układ startowy zabezpieczony. Reinicjalizacja populacji...\n";
+
+                // 5. Elityzm: Zachowujemy najlepszego osobnika na pozycji 0, resztę populacji ewolujemy na nowej bazie
+                std::vector<double> refined_sabre_genes = generate_sabre_base_genes(n_genes, n_gates, blocks, sabre_seed_profile, rng);
+                boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
+
+                // Kopiujemy najlepszego z poprzedniego pasu do tymczasowego bufora
+                std::vector<double> best_genes_backup(pop.begin() + best_idx * n_genes, pop.begin() + (best_idx + 1) * n_genes);
+                double best_fitness_backup = fitness[best_idx];
+
+                for (int i = 0; i < pop_size; ++i) {
+                    double* pop_ptr = pop.data() + (i * n_genes);
+                    if (i == 0) {
+                        // Pozycja 0 dostaje nowe, ulepszone feedbackiem ziarno
+                        std::copy(refined_sabre_genes.begin(), refined_sabre_genes.end(), pop_ptr);
+                    } else {
+                        // Reszta dostaje świeżą losową krew eksploracyjną
+                        for (int j = 0; j < n_genes; ++j) pop_ptr[j] = dist_real(rng);
+                    }
+                    fitness[i] = evaluate_fitness(pop_ptr, dummy_s, dummy_m, dummy_t, dummy_d, nullptr, can_lazy);
+                }
+
+                // Nadpisujemy najgorszego osobnika naszym starym globalnym mistrzem (twardy elityzm między-pasowy)
+                auto worst_it = std::max_element(fitness.begin(), fitness.end());
+                int worst_idx = std::distance(fitness.begin(), worst_it);
+                if (best_fitness_backup < fitness[worst_idx]) {
+                    std::copy(best_genes_backup.begin(), best_genes_backup.end(), pop.begin() + worst_idx * n_genes);
+                    fitness[worst_idx] = best_fitness_backup;
+                }
+            }
+        }
+
+        std::cout << "[Feedback Loop] Rozpoczynanie ewolucji (Generacje: " << generations_per_pass << ")...\n";
+        run_standard_evolution_loop(pop, fitness, pop_size, generations_per_pass, n_genes, n_gates, f, cr, rng, can_lazy);
+
+        auto best_it = std::min_element(fitness.begin(), fitness.end());
+        best_idx = std::distance(fitness.begin(), best_it);
+        std::cout << "[Feedback Loop] Najlepszy wynik w pasie " << pass << ": " << fitness[best_idx] << "\n";
+    }
+
+    // Finalizacja całego procesu i eksport statystyk
+    finalize_optimization_result(pop, best_idx, n_genes, can_lazy, global_start_time);
+}
+
+OptimizationResult SabreDEHybridRouter::optimize_windowed_with_feedback(
+    int pop_size, int generations_per_window, int window_size, double accept_ratio,
+    int feedback_passes, bool allow_lazy_offboard, double f, double cr)
+{
+    int n_gates = dag.nodes.size();
+    if (n_gates == 0) return {};
+
+    bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
+    int blocks = can_lazy ? 5 : 4;
+    int n_genes = n_gates * blocks;
+
+    auto global_start_time = std::chrono::high_resolution_clock::now();
+    boost::random::xoshiro256pp rng(random_seed);
+
+    std::cout << "[Feedback+Windowed] Faza wstępna: Generowanie ziarna...\n";
+    std::vector<int> logical_exec_order = prepare_sabre_seed(can_lazy, n_genes, blocks);
+
+    std::vector<double> pop(pop_size * n_genes), fitness(pop_size);
+    initialize_de_population(pop_size, n_genes, n_gates, blocks, sabre_seed_profile, pop, fitness, rng, can_lazy);
+
+    int step = std::max(1, static_cast<int>(window_size * accept_ratio));
+    int best_idx = 0;
+
+    // Zmienna do śledzenia kopa dopaminowego między pasami!
+    double best_global_score = std::numeric_limits<double>::max();
+
+    // --- GŁÓWNA PĘTLA FEEDBACKU (PASY) ---
+    for (int pass = 0; pass <= feedback_passes; ++pass) {
+        std::cout << "\n======================================================\n";
+        std::cout << "[Feedback+Windowed] ROZPOCZYNANIE PASU " << pass << " / " << feedback_passes << "\n";
+        std::cout << "======================================================\n";
+
+        if (pass > 0) {
+            std::cout << ">> Aktualizacja mapowania początkowego na bazie układu końcowego...\n";
+
+            DEStateSnapshot final_state;
+            final_state.is_valid = false;
+            final_state.target_gates_routed = n_gates;
+
+            int dummy_s, dummy_m, dummy_d; double dummy_t;
+            evaluate_fitness_impl<false>(
+                pop.data() + best_idx * n_genes, dummy_s, dummy_m, dummy_t, dummy_d,
+                nullptr, can_lazy, nullptr, &final_state
+            );
+
+            if (final_state.is_valid) {
+                std::vector<int> de_final_mapping = final_state.l2p;
+                std::vector<int> new_initial_mapping = run_sabre_pass(reversed_dag, de_final_mapping, false, nullptr);
+
+                saved_initial_l2p.assign(topo.qubits.size(), -1);
+                for (size_t i = 0; i < new_initial_mapping.size(); ++i) {
+                    saved_initial_l2p[i] = new_initial_mapping[i];
+                }
+
+                SabreSeedProfile refined_profile;
+                refined_profile.resonator_choice_index.assign(n_gates, -1);
+                refined_profile.resonator_choice_count.assign(n_gates, 0);
+                refined_profile.q1_goes_in.assign(n_gates, -1);
+
+                run_sabre_pass(dag, new_initial_mapping, true, &refined_profile, nullptr, false);
+                sabre_seed_profile = std::move(refined_profile);
+
+                logical_exec_order = sabre_seed_profile.logical_exec_order;
+
+                std::vector<double> refined_sabre_genes = generate_sabre_base_genes(n_genes, n_gates, blocks, sabre_seed_profile, rng);
+                boost::random::uniform_real_distribution<double> dist_real(0.0, 1.0);
+
+                std::vector<double> best_genes_backup(pop.begin() + best_idx * n_genes, pop.begin() + (best_idx + 1) * n_genes);
+                double best_fitness_backup = fitness[best_idx];
+
+                for (int i = 0; i < pop_size; ++i) {
+                    double* pop_ptr = pop.data() + (i * n_genes);
+                    if (i == 0) {
+                        std::copy(refined_sabre_genes.begin(), refined_sabre_genes.end(), pop_ptr);
+                    } else {
+                        for (int j = 0; j < n_genes; ++j) pop_ptr[j] = dist_real(rng);
+                    }
+                    fitness[i] = evaluate_fitness(pop_ptr, dummy_s, dummy_m, dummy_t, dummy_d, nullptr, can_lazy);
+                }
+
+                auto worst_it = std::max_element(fitness.begin(), fitness.end());
+                int worst_idx = std::distance(fitness.begin(), worst_it);
+                if (best_fitness_backup < fitness[worst_idx]) {
+                    std::copy(best_genes_backup.begin(), best_genes_backup.end(), pop.begin() + worst_idx * n_genes);
+                    fitness[worst_idx] = best_fitness_backup;
+                }
+            }
+        }
+
+        std::vector<int> gate_time_map(n_gates, 0);
+        for (size_t i = 0; i < logical_exec_order.size(); ++i) {
+            gate_time_map[logical_exec_order[i]] = i;
+        }
+
+        DEStateSnapshot current_snapshot;
+        current_snapshot.is_valid = false;
+
+        // Bierzemy koszt początkowy całego pasu do porównania
+        auto current_best_it = std::min_element(fitness.begin(), fitness.end());
+        best_idx = std::distance(fitness.begin(), current_best_it);
+
+        // --- PĘTLA OKIENKOWA DLA BIEŻĄCEGO PASU ---
+        for (int w_start = 0; w_start < n_gates; w_start += step) {
+            int w_end = std::min(w_start + window_size, n_gates);
+
+            // LOGOWANIE STARTU OKNA
+            double window_start_score = fitness[best_idx];
+            std::cout << ">>> [Pas " << pass << "] Okno: [" << w_start << " - " << w_end - 1 << "] / " << n_gates
+                      << " | Startowy koszt: " << window_start_score << " ...\n";
+
+            run_evolution_loop_windowed(pop, fitness, pop_size, generations_per_window, n_genes, n_gates, f, cr, rng, w_start, w_end, &current_snapshot, gate_time_map);
+
+            auto best_iter = std::min_element(fitness.begin(), fitness.end());
+            best_idx = std::distance(fitness.begin(), best_iter);
+
+            // LOGOWANIE WYNIKU OKNA I ZYSKU (DOPAMINKA)
+            double window_end_score = fitness[best_idx];
+            double improvement = window_start_score - window_end_score;
+
+            if (improvement > 0) {
+                std::cout << "OPTYMALIZACJA! Koszt: " << window_start_score << " -> " << window_end_score
+                          << "(Zysk: " << improvement << "!)\n";
+            } else {
+                std::cout << "Utrzymano koszt: " << window_end_score << "\n";
+            }
+
+            int accept_end = std::min(w_start + step, n_gates);
+            propagate_window_success(pop, fitness, pop_size, n_genes, n_gates, blocks, best_idx, accept_end, gate_time_map, current_snapshot, can_lazy);
+        }
+
+        // --- PODSUMOWANIE PASU ---
+        double pass_final_score = fitness[best_idx];
+        if (pass_final_score < best_global_score) {
+            if (best_global_score != std::numeric_limits<double>::max()) {
+                double global_improvement = best_global_score - pass_final_score;
+                std::cout << "\nNOWY GLOBALNY REKORD! Pas " << pass << " urwał kolejne " << global_improvement << " pkt!\n";
+            }
+            best_global_score = pass_final_score;
+            std::cout << "Aktualny the-best koszt: " << best_global_score << "\n";
+        } else {
+            std::cout << "\nKoniec pasu " << pass << ". Wynik: " << pass_final_score
+                      << " (Globalny rekord: " << best_global_score << " pozostał niepobity)\n";
+        }
+    }
+
+    return finalize_optimization_result(pop, best_idx, n_genes, can_lazy, global_start_time);
 }

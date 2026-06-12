@@ -140,7 +140,7 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     std::random_device rd;
     const uint32_t sabre_seed = rd();
     const uint64_t hybrid_seed = sabre_seed;
-    const int sabre_runs = 50;
+    const int sabre_runs = 100;
     const int hybrid_sabre_seed_trials = 50; // liczba losowych ustawien startowych SABRE dla ziarna DE
 
     // 1. Wykonanie algorytmu bazowego (Benchmark zachłanny ASAP)
@@ -161,7 +161,9 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
     SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed);
     SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
-    SabreDERouter.optimize_windowed(30, 400, 500, 0.6, false, 0.8);
+    // SabreDERouter.optimize_windowed(30, 400, 500, 0.6, false, 0.8);
+    SabreDERouter.optimize_with_feedback(30, 200, 10, false, 0.8, 0.9);
+    // SabreDERouter.optimize_windowed_with_feedback(30, 300, 500, 0.7, 10, false, 0.8, 0.9);
 
     // 5. Wykonanie algorytmu newDEHybridSabre
     // newSabreDEHybridRouter newSabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, 4);
@@ -178,18 +180,18 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     int logical_qubits_count = qpu.get_num_qubits() * 1.0;
     CircuitGenerator generator(qpu, logical_qubits_count, 1234);
 
-    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
+    std::vector<Gate> circuit = generator.generate(2000, 0.2, 0.1);
     generator.print_gate_statistics(circuit);
     generator.print_circuit(circuit);
 
     // --- Konfiguracja losowosci i liczby prob ---
-    const bool use_random_seeds = false;
+    const bool use_random_seeds = true;
     std::random_device rd;
     const uint32_t sabre_seed = rd();
     const uint64_t hybrid_seed = sabre_seed;
-    const int sabre_runs = 50;
-    const int hybrid_runs = 10;
-    const int hybrid_sabre_seed_trials = 10;
+    const int sabre_runs = 20;
+    const int hybrid_runs = 5;
+    const int hybrid_sabre_seed_trials = 20;
 
     SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
     sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
@@ -201,12 +203,13 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     results.reserve(hybrid_runs);
 
     for (int i = 0; i < hybrid_runs; ++i) {
-        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 4);
+        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 1);
         SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
         SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
 
         // Odbieramy całą strukturę wyników
-        OptimizationResult res = SabreDERouter.optimize_windowed(30, 200, 4000, 1.0,  false, 0.2);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 300, 0.6,  false, 0.9);
+        // OptimizationResult res = SabreDERouter.optimize_windowed_with_feedback(30, 300, 500, 0.7, 6, false, 0.8, 0.9);
         results.push_back(res);
 
         std::cout << "Iteracja " << (i + 1) << " zakonczona. "
@@ -287,8 +290,8 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
  #endif
      // Topologia siatki 2x2
        IQMConstellation gridQpu(5, 5);
-       run_test_for_topology(gridQpu, "Siatka 5x5");
-//       run_test_for_topologyII(gridQpu, "Siatka 5x5");
+       // run_test_for_topology(gridQpu, "Siatka 5x5");
+       run_test_for_topologyII(gridQpu, "Siatka 5x5");
 
      // Topologia trójkątna
 //     IQMTriangleConstellation triangleQpu;
@@ -297,6 +300,141 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
 
      return 0;
  }
+
+// void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name, int num_circuits, int runs_per_circuit) {
+//     std::cout << "\n============================================\n";
+//     std::cout << "URUCHAMIAM TEST DLA TOPOLOGII: " << name << "\n";
+//     std::cout << "Testowanych obwodow (X): " << num_circuits << "\n";
+//     std::cout << "Liczba przebiegow na obwod (Y): " << runs_per_circuit << "\n";
+//     std::cout << "============================================\n";
+//     qpu.print_stats();
+//
+//     int logical_qubits_count = qpu.get_num_qubits() * 1.0;
+//     const bool use_random_seeds = true;
+//     std::random_device rd;
+//
+//     // --- PĘTLA PO RÓŻNYCH OBWODACH (X) ---
+//     for (int c = 0; c < num_circuits; ++c) {
+//         std::cout << "\n********************************************\n";
+//         std::cout << " GENEROWANIE I TESTOWANIE OBWODU " << (c + 1) << " / " << num_circuits << "\n";
+//         std::cout << "********************************************\n";
+//
+//         // Zmiana seeda dla każdego obwodu, aby zawsze był inny
+//         int circuit_seed = use_random_seeds ? rd() : (1234);
+//         CircuitGenerator generator(qpu, logical_qubits_count, circuit_seed);
+//
+//         std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
+//         generator.print_gate_statistics(circuit);
+//
+//         // Zostawiam zakomentowane, aby nie zaśmiecać konsoli przy wielu obwodach
+//         // generator.print_circuit(circuit);
+//
+//         // --- Konfiguracja losowosci i liczby prob dla danego obwodu ---
+//         const uint32_t sabre_seed = rd();
+//         const uint64_t hybrid_seed = sabre_seed;
+//         const int sabre_runs = 100;
+//         const int hybrid_sabre_seed_trials = 10;
+//
+//         SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name);
+//         sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
+//         sabre.run_benchmark_multiple(sabre_runs);
+//
+//         std::cout << "\n--- Rozpoczynam " << runs_per_circuit << " iteracji dla DEHybridSabre (Obwod " << (c + 1) << ") ---\n";
+//
+//         std::vector<OptimizationResult> results;
+//         results.reserve(runs_per_circuit);
+//
+//         // --- PĘTLA PO PRZEBIEGACH DLA DANEGO OBWODU (Y) ---
+//         for (int i = 0; i < runs_per_circuit; ++i) {
+//             SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, 3);
+//             SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
+//             SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
+//
+//             // Odbieramy całą strukturę wyników
+//             OptimizationResult res = SabreDERouter.optimize_windowed(30, 300, 500, 0.7, false, 0.9);
+//             results.push_back(res);
+//
+//             std::cout << " Iteracja " << (i + 1) << " zakonczona. "
+//                       << "Wynik: " << res.score << ", "
+//                       << "SWAPy: " << res.swaps << ", "
+//                       << "Makespan: " << res.makespan << "\n";
+//         }
+//
+//         // --- OBLICZANIE STATYSTYK DLA DANEGO OBWODU ---
+//         OptimizationResult min_val = results[0];
+//         OptimizationResult max_val = results[0];
+//         OptimizationResult sum_val = results[0];
+//         OptimizationResult best_result = results[0];
+//
+//         for (int i = 1; i < runs_per_circuit; ++i) {
+//             if (results[i].score < best_result.score) {
+//                 best_result = results[i];
+//             }
+//
+//             min_val.score = std::min(min_val.score, results[i].score);
+//             max_val.score = std::max(max_val.score, results[i].score);
+//             sum_val.score += results[i].score;
+//
+//             min_val.makespan = std::min(min_val.makespan, results[i].makespan);
+//             max_val.makespan = std::max(max_val.makespan, results[i].makespan);
+//             sum_val.makespan += results[i].makespan;
+//
+//             min_val.depth = std::min(min_val.depth, results[i].depth);
+//             max_val.depth = std::max(max_val.depth, results[i].depth);
+//             sum_val.depth += results[i].depth;
+//
+//             min_val.swaps = std::min(min_val.swaps, results[i].swaps);
+//             max_val.swaps = std::max(max_val.swaps, results[i].swaps);
+//             sum_val.swaps += results[i].swaps;
+//
+//             min_val.moves = std::min(min_val.moves, results[i].moves);
+//             max_val.moves = std::max(max_val.moves, results[i].moves);
+//             sum_val.moves += results[i].moves;
+//         }
+//
+//         std::cout << "\n--------------------------------------------\n";
+//         std::cout << " PODSUMOWANIE OBWODU " << (c + 1) << " (" << runs_per_circuit << " uruchomien)\n";
+//         std::cout << "--------------------------------------------\n";
+//
+//         std::cout << " [NAJLEPSZY ZNALEZIONY WYNIK (wg min Score)]\n";
+//         std::cout << " Score: " << best_result.score << "\n";
+//         std::cout << " Makespan: " << best_result.makespan << "\n";
+//         std::cout << " Depth: " << best_result.depth << "\n";
+//         std::cout << " Swaps: " << best_result.swaps << "\n";
+//         std::cout << " Moves: " << best_result.moves << "\n";
+//         std::cout << "--------------------------------------------\n";
+//
+//         std::cout << " [SCORE]     Min: " << min_val.score << " | Max: " << max_val.score << " | Srednia: " << (sum_val.score / runs_per_circuit) << "\n";
+//         std::cout << " [MAKESPAN]  Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Srednia: " << (sum_val.makespan / runs_per_circuit) << "\n";
+//         std::cout << " [DEPTH]     Min: " << min_val.depth << " | Max: " << max_val.depth << " | Srednia: " << (static_cast<double>(sum_val.depth) / runs_per_circuit) << "\n";
+//         std::cout << " [SWAPS]     Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Srednia: " << (static_cast<double>(sum_val.swaps) / runs_per_circuit) << "\n";
+//         std::cout << " [MOVES]     Min: " << min_val.moves << " | Max: " << max_val.moves << " | Srednia: " << (static_cast<double>(sum_val.moves) / runs_per_circuit) << "\n";
+//         std::cout << "============================================\n";
+//     }
+// }
+//
+// int main() {
+// #ifdef _WIN32
+//     // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
+//     SetConsoleOutputCP(CP_UTF8);
+//     // Opcjonalnie: upewnia się, że wejście (cin) też używa UTF-8
+//     SetConsoleCP(CP_UTF8);
+// #endif
+//
+//     // Definiujemy X obwodów i Y przebiegów
+//     const int X_CIRCUITS = 5;
+//     const int Y_RUNS = 5;
+//
+//     // Topologia siatki 2x2
+//     IQMConstellation gridQpu(5, 5);
+//     run_test_for_topologyII(gridQpu, "Siatka 5x5", X_CIRCUITS, Y_RUNS);
+//
+//     // Topologia trójkątna (zakomentowane jako opcja)
+//     // IQMTriangleConstellation triangleQpu;
+//     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory", X_CIRCUITS, Y_RUNS);
+//
+//     return 0;
+// }
 
 
 //int main(int argc, char* argv[]) {

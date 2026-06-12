@@ -326,6 +326,10 @@ public:
     void set_sabre_seed_trials(int trials);
     void optimize(int pop_size, int generations, bool allow_lazy_offboard = false, double f = 0.8, double cr = 0.9);
     OptimizationResult optimize_windowed(int pop_size, int generations_per_window, int window_size = 100, double accept_ratio = 0.5, bool allow_lazy_offboard = false, double f = 0.9, double cr = 0.9);
+    OptimizationResult optimize_windowed_with_feedback(
+    int pop_size, int generations_per_window, int window_size, double accept_ratio,
+    int feedback_passes, bool allow_lazy_offboard, double f, double cr);
+    void optimize_with_feedback(int pop_size, int generations_per_pass, int feedback_passes, bool allow_lazy_offboard, double f, double cr);
     OptimizationResult evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit);
 };
 
