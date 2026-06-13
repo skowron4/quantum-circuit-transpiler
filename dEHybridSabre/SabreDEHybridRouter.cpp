@@ -60,7 +60,7 @@ inline void SabreDEHybridRouter::init_distance_cache() {
     int p_cnt = topo.qubits.size();
     dist_cache.assign(p_cnt * p_cnt, -1);
 
-    std::cout << "[Inicjalizacja] Pre-kalkulacja pełnej macierzy odległości...\n";
+    // std::cout << "[Inicjalizacja] Pre-kalkulacja pełnej macierzy odległości...\n";
     for (int i = 0; i < p_cnt; ++i) {
         for (int j = i; j < p_cnt; ++j) {
             if (i == j) {
@@ -1172,27 +1172,27 @@ void SabreDEHybridRouter::initialize_de_population(int pop_size, int n_genes, in
 
         // Osobnik 0 to nasze Ziarno, wyświetlamy jego stan logiki
         if (i == 0) {
-            print_seed_evaluation(seed_profile, d_s, d_m, d_t, d_d, fitness[i]);
+            // print_seed_evaluation(seed_profile, d_s, d_m, d_t, d_d, fitness[i]);
         }
     }
 }
 
 
 void SabreDEHybridRouter::optimize(int pop_size, int generations, bool allow_lazy_offboard, double f, double cr) {
-    std::cout << "\n[Hybryda 3.0] Faza 1: Generowanie pełnego ziarna SABRE (priorytety + decyzje sprzętowe)...\n";
+    // std::cout << "\n[Hybryda 3.0] Faza 1: Generowanie pełnego ziarna SABRE (priorytety + decyzje sprzętowe)...\n";
 
     int n_gates = dag.nodes.size();
     if (n_gates == 0) return;
 
     bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
-    if (can_lazy) std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
+    // if (can_lazy) std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
 
     int blocks = can_lazy ? 5 : 4;
     int n_genes = n_gates * blocks;
     std::vector<int> logical_exec_order = prepare_sabre_seed(can_lazy, n_genes, blocks);
 
-    std::cout << "[Hybryda 3.0] Odrzucono sztuczne SWAP-y. Wyciągnięto czysty harmonogram logiczny (" << logical_exec_order.size() << " bramek).\n";
-    std::cout << "[Hybryda 3.0] Faza 2: Dynamiczne DE minimalizuje koszty na bazie ziarna...\n";
+    // std::cout << "[Hybryda 3.0] Odrzucono sztuczne SWAP-y. Wyciągnięto czysty harmonogram logiczny (" << logical_exec_order.size() << " bramek).\n";
+    // std::cout << "[Hybryda 3.0] Faza 2: Dynamiczne DE minimalizuje koszty na bazie ziarna...\n";
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -1240,13 +1240,13 @@ void SabreDEHybridRouter::run_standard_evolution_loop(std::vector<double>& pop, 
 // Przygotowanie środowiska, wygenerowanie "ziarna" za pomocą SABRE, a następnie zorganizowanie pętli przesuwającej okno wzdłuż osi czasu obwodu logicznego.
 // ==============================================================================
 OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int generations_per_window, int window_size, double accept_ratio, bool allow_lazy_offboard, double f, double cr) {
-    std::cout << "\n[Hybryda 3.0 (WINDOWED)] Faza 1: Generowanie pełnego ziarna SABRE (priorytety + decyzje sprzętowe)...\n";
+    // std::cout << "\n[Hybryda 3.0 (WINDOWED)] Faza 1: Generowanie pełnego ziarna SABRE (priorytety + decyzje sprzętowe)...\n";
 
     int n_gates = dag.nodes.size();
     if (n_gates == 0) return {};
 
     bool can_lazy = allow_lazy_offboard && (num_qubits < topo.qubits.size());
-    if (can_lazy) std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
+    // if (can_lazy) std::cout << "Aktywowano Lazy Off-boarding (wolne kubity fizyczne dostępne).\n";
 
     int blocks = can_lazy ? 5 : 4;
     int n_genes = n_gates * blocks;
@@ -1257,7 +1257,7 @@ OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int gene
         gate_time_map[logical_exec_order[i]] = i;
     }
 
-    std::cout << "[Hybryda 3.0] Faza 2: DE Windowed na bazie logicznej (Rozmiar okna: " << window_size << ")...\n";
+    // std::cout << "[Hybryda 3.0] Faza 2: DE Windowed na bazie logicznej (Rozmiar okna: " << window_size << ")...\n";
     auto start_time = std::chrono::high_resolution_clock::now();
 
     std::vector<double> pop(pop_size * n_genes), fitness(pop_size);
@@ -1274,7 +1274,7 @@ OptimizationResult SabreDEHybridRouter::optimize_windowed(int pop_size, int gene
     // GŁÓWNA PĘTLA OKIENKOWA
     for (int w_start = 0; w_start < n_gates; w_start += step) {
         int w_end = std::min(w_start + window_size, n_gates);
-        std::cout << ">>> Przetwarzanie okna: operacje [" << w_start << " - " << w_end - 1 << "] / " << n_gates << "\n";
+        // std::cout << ">>> Przetwarzanie okna: operacje [" << w_start << " - " << w_end - 1 << "] / " << n_gates << "\n";
 
         run_evolution_loop_windowed(pop, fitness, pop_size, generations_per_window, n_genes, n_gates, f, cr, rng, w_start, w_end, &current_snapshot, gate_time_map);
 
@@ -1333,15 +1333,15 @@ OptimizationResult SabreDEHybridRouter::finalize_optimization_result(const std::
 
     double final_score = evaluate_fitness(pop.data() + best_idx * n_genes, final_swaps, final_moves, final_makespan, final_depth, &final_log, can_lazy);
 
-    std::cout << "\n=== WALIDACJA OBWODU LOGICZNEGO ===\n";
+    // std::cout << "\n=== WALIDACJA OBWODU LOGICZNEGO ===\n";
     if (!validate_logical_circuit(final_log)) {
         std::cerr << "BLAD: Walidacja obwodu nie powiodła się!\n";
         exit(-1);
     }
-    std::cout << "===================================\n";
+    // std::cout << "===================================\n";
 
     double execution_time = std::chrono::duration<double>(end_time - start_time).count();
-    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, execution_time);
+    // print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, execution_time);
     export_moves_to_file(final_log, "../hybrid_schedule_moves_" + name + ".txt");
 
     return {final_score, final_makespan, execution_time, final_depth, final_swaps, final_moves};
@@ -1898,13 +1898,13 @@ std::vector<int> SabreDEHybridRouter::run_sabre_pass(const HybridSabreDAG& curre
         }
 
         if (print_details) {
-            std::cout << "\n=== STATYSTYKI SAMEGO SABRE (Czyste wykonanie heurystyki) ===\n";
-            std::cout << "Wykorzystane operacje SWAP: " << ctx.out_swaps << "\n";
-            std::cout << "Wykorzystane operacje MOVE: " << ctx.out_moves << "\n";
-            std::cout << "Czas fizyczny obwodu (Makespan): " << max_physical_time << " [jednostek]\n";
-            std::cout << "Głębokość warstwowa (Logical Depth): " << max_logical_depth << " [warstw]\n";
-            std::cout << "Koszt routingu (Total Routing Cost): " << ctx.total_routing_cost << "\n";
-            std::cout << "==============================================================\n";
+            // std::cout << "\n=== STATYSTYKI SAMEGO SABRE (Czyste wykonanie heurystyki) ===\n";
+            // std::cout << "Wykorzystane operacje SWAP: " << ctx.out_swaps << "\n";
+            // std::cout << "Wykorzystane operacje MOVE: " << ctx.out_moves << "\n";
+            // std::cout << "Czas fizyczny obwodu (Makespan): " << max_physical_time << " [jednostek]\n";
+            // std::cout << "Głębokość warstwowa (Logical Depth): " << max_logical_depth << " [warstw]\n";
+            // std::cout << "Koszt routingu (Total Routing Cost): " << ctx.total_routing_cost << "\n";
+            // std::cout << "==============================================================\n";
         }
     } else if (out_routing_cost) {
         *out_routing_cost = ctx.total_routing_cost;
@@ -2166,7 +2166,7 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed(bool can_lazy, int n_ge
     double d_t = 0.0;
 
     if (has_forced_initial_mapping) {
-        std::cout << "[Hybryda 3.0] Uzywam sztywnego layoutu startowego przekazanego z eksperymentu.\n";
+        // std::cout << "[Hybryda 3.0] Uzywam sztywnego layoutu startowego przekazanego z eksperymentu.\n";
 
         saved_initial_l2p.assign(topo.qubits.size(), -1);
         cache_initial_mapping(forced_initial_l2p, saved_initial_l2p);
@@ -2186,13 +2186,13 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed(bool can_lazy, int n_ge
         sabre_seed_profile_bank.clear();
         sabre_seed_profile_bank.push_back(sabre_seed_profile);
 
-        std::cout << "[Hybryda 3.0] Sztywny layout: koszt SABRE=" << fixed_sabre_score
-                  << ", DE-score seeda=" << fixed_de_score << "\n";
+        // std::cout << "[Hybryda 3.0] Sztywny layout: koszt SABRE=" << fixed_sabre_score
+        //           << ", DE-score seeda=" << fixed_de_score << "\n";
 
         return sabre_seed_profile.logical_exec_order;
     }
 
-    std::cout << "[Hybryda 3.0] SABRE sprawdza ustawienia startowe (Identycznościowe, Degree-based, Time-decay, Losowe): " << sabre_seed_trials << "\n";
+    // std::cout << "[Hybryda 3.0] SABRE sprawdza ustawienia startowe (Identycznościowe, Degree-based, Time-decay, Losowe): " << sabre_seed_trials << "\n";
 
     for (int trial = 0; trial < sabre_seed_trials; ++trial) {
         std::vector<int> initial_mapping;
@@ -2258,12 +2258,12 @@ std::vector<int> SabreDEHybridRouter::prepare_sabre_seed(bool can_lazy, int n_ge
                                    (best_trial == 2) ? "Degree-based" :
                                    (best_trial == 3) ? "Time-decay" : "Losowe";
 
-    std::cout << "[Hybryda 3.0] Najlepsze ustawienie SABRE: " << winning_strategy
-              << " (próba " << best_trial << " / " << sabre_seed_trials
-              << "), blended-score: " << best_blended_score
-              << ", DE-score seeda: " << best_de_score
-              << ", koszt SABRE: " << best_sabre_score
-              << ", seed-bank: " << sabre_seed_profile_bank.size() << "\n";
+    // std::cout << "[Hybryda 3.0] Najlepsze ustawienie SABRE: " << winning_strategy
+    //           << " (próba " << best_trial << " / " << sabre_seed_trials
+    //           << "), blended-score: " << best_blended_score
+    //           << ", DE-score seeda: " << best_de_score
+    //           << ", koszt SABRE: " << best_sabre_score
+    //           << ", seed-bank: " << sabre_seed_profile_bank.size() << "\n";
 
     saved_initial_l2p.assign(topo.qubits.size(), -1);
     cache_initial_mapping(best_pre_final_mapping, saved_initial_l2p);
@@ -2681,7 +2681,7 @@ void SabreDEHybridRouter::print_statistics(double best_score, double physical_ti
 }
 
 void SabreDEHybridRouter::print_optimized_circuit(const std::vector<RoutingRecord>& log) const {
-    if (log.empty()) { std::cout << "Zoptymalizowany obwód jest pusty!!\n"; return; }
+    // if (log.empty()) { std::cout << "Zoptymalizowany obwód jest pusty!!\n"; return; }
     int n_q = topo.qubits.size();
     std::vector<std::stringstream> lines_q(n_q);
     for (int i = 0; i < n_q; ++i) { lines_q[i] << "q" << (i < 10 ? "0" : "") << i << (i < num_qubits ? " [L]: " : " [E]: "); }
@@ -2715,9 +2715,9 @@ void SabreDEHybridRouter::print_optimized_circuit(const std::vector<RoutingRecor
             for (int i = 0; i < n_q; ++i) lines_q[i] << (i == q_in ? (q_in_is_control ? ctrl_char : targ_char) : i == q_stay ? (q_in_is_control ? targ_char : ctrl_char) : (i > min_q && i < max_q && q_in != -1) ? "--|--" : "-----");
         }
     }
-    std::cout << "\n=== WIZUALIZACJA ZOPTYMALIZOWANEGO OBWODU (HYBRYDA 3.0) ===\n";
+    // std::cout << "\n=== WIZUALIZACJA ZOPTYMALIZOWANEGO OBWODU (HYBRYDA 3.0) ===\n";
     for (int i = 0; i < n_q; ++i) std::cout << lines_q[i].str() << "\n";
-    std::cout << "===========================================================\n";
+    // std::cout << "===========================================================\n";
 }
 
 void SabreDEHybridRouter::export_moves_to_file(const std::vector<RoutingRecord>& moves, const std::string& filename) {
@@ -2729,7 +2729,7 @@ void SabreDEHybridRouter::export_moves_to_file(const std::vector<RoutingRecord>&
         if (std::abs(move.start_time - current_time) > 1e-5) { time_step++; current_time = move.start_time; }
         out << time_step << "," << to_string(move.op_type) << "," << move.gate_id << "," << move.lq1 << "," << move.lq2 << "," << move.loc1 << "," << move.loc2 << "," << move.res_used << "\n";
     }
-    std::cout << ">>> Zapisano harmonogram (Hybryda 3.0) do: " << filename << "\n";
+    // std::cout << ">>> Zapisano harmonogram (Hybryda 3.0) do: " << filename << "\n";
 }
 
 OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit) {
@@ -2897,15 +2897,15 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     // Liczymy tę samą funkcję fitness, której używa hybryda, żeby CSV było porównywalne.
     double final_score = calculate_fitness_score(total_routing_cost, out_swaps, out_moves, max_physical_time, max_logical_depth);
 
-    std::cout << "\n============================================================\n";
-    std::cout << "=== FINALNA EWALUACJA PROFILU QISKIT SABRE NA MODELU IQM ===\n";
+    // std::cout << "\n============================================================\n";
+    // std::cout << "=== FINALNA EWALUACJA PROFILU QISKIT SABRE NA MODELU IQM ===\n";
 
     // UWAGA: Upewnij się, że masz metodę print_statistics dostępną w swojej klasie.
     // print_statistics(final_score, max_physical_time, max_logical_depth, out_swaps, out_moves, 0.0);
 
-    std::cout << "KOSZT: " << final_score << " | CZAS FIZYCZNY: " << max_physical_time << " | GŁĘBOKOŚĆ: " << max_logical_depth << "\n";
-    std::cout << "SWAPY: " << out_swaps << " | MOVES: " << out_moves << "\n";
-    std::cout << "============================================================\n";
+    // std::cout << "KOSZT: " << final_score << " | CZAS FIZYCZNY: " << max_physical_time << " | GŁĘBOKOŚĆ: " << max_logical_depth << "\n";
+    // std::cout << "SWAPY: " << out_swaps << " | MOVES: " << out_moves << "\n";
+    // std::cout << "============================================================\n";
 
     // export_moves_to_file(final_log, "../qiskit_faithful_schedule_" + name + ".txt");
 

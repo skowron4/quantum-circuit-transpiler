@@ -13,6 +13,7 @@ find_package(boost_random CONFIG REQUIRED)
 find_package(boost_align CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(absl CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 # --- Biblioteka Interfejsowa (Twoje zależności) ---
 add_library(project_deps INTERFACE)

@@ -742,11 +742,11 @@ SabreBenchmarkResult SabreRouter::run_benchmark_with_initial_mapping(const std::
 
 void SabreRouter::run_benchmark_multiple(int num_runs) {
     if (num_runs <= 0) {
-        std::cout << "Liczba uruchomien SABRE musi byc dodatnia.\n";
+        // std::cout << "Liczba uruchomien SABRE musi byc dodatnia.\n";
         return;
     }
 
-    std::cout << "\n--- Rozpoczynam " << num_runs << " iteracji dla SABRE ---\n";
+    // std::cout << "\n--- Rozpoczynam " << num_runs << " iteracji dla SABRE ---\n";
     auto total_start_time = std::chrono::steady_clock::now();
 
     std::vector<SabreBenchmarkResult> results;
@@ -797,38 +797,38 @@ void SabreRouter::run_benchmark_multiple(int num_runs) {
         sum_val.moves += results[i].moves;
     }
 
-    std::cout << "\n============================================\n";
-    std::cout << " PODSUMOWANIE SABRE (" << num_runs << " uruchomien)\n";
-    std::cout << "============================================\n";
-
-    std::cout << " [NAJLEPSZY PRZEBIEG]\n";
-    std::cout << " Iteracja: " << best_run << "\n";
-    std::cout << " Wynik: " << best_val.score << "\n";
-    std::cout << " Makespan: " << best_val.makespan << "\n";
-    std::cout << " Depth: " << best_val.depth << "\n";
-    std::cout << " SWAPy: " << best_val.swaps << "\n";
-    std::cout << " MOVEs: " << best_val.moves << "\n";
-    std::cout << " Czas wykonania: " << best_val.execution_time << " sekund\n";
-
-    std::cout << " [SCORE]\n";
-    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Srednia: " << (sum_val.score / num_runs) << "\n";
-
-    std::cout << " [MAKESPAN]\n";
-    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Srednia: " << (sum_val.makespan / num_runs) << "\n";
-
-    std::cout << " [DEPTH]\n";
-    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Srednia: " << (static_cast<double>(sum_val.depth) / num_runs) << "\n";
-
-    std::cout << " [SWAPS]\n";
-    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Srednia: " << (static_cast<double>(sum_val.swaps) / num_runs) << "\n";
-
-    std::cout << " [MOVES]\n";
-    std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Srednia: " << (static_cast<double>(sum_val.moves) / num_runs) << "\n";
-
-    std::cout << " [CZAS WYKONANIA]\n";
-    std::cout << " Min: " << min_val.execution_time << " | Max: " << max_val.execution_time << " | Srednia: " << (sum_val.execution_time / num_runs) << " sekund\n";
-    std::cout << " Lacznie dla " << num_runs << " uruchomien: " << total_execution_time.count() << " sekund\n";
-    std::cout << "============================================\n";
+    // std::cout << "\n============================================\n";
+    // std::cout << " PODSUMOWANIE SABRE (" << num_runs << " uruchomien)\n";
+    // std::cout << "============================================\n";
+    //
+    // std::cout << " [NAJLEPSZY PRZEBIEG]\n";
+    // std::cout << " Iteracja: " << best_run << "\n";
+    // std::cout << " Wynik: " << best_val.score << "\n";
+    // std::cout << " Makespan: " << best_val.makespan << "\n";
+    // std::cout << " Depth: " << best_val.depth << "\n";
+    // std::cout << " SWAPy: " << best_val.swaps << "\n";
+    // std::cout << " MOVEs: " << best_val.moves << "\n";
+    // std::cout << " Czas wykonania: " << best_val.execution_time << " sekund\n";
+    //
+    // std::cout << " [SCORE]\n";
+    // std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Srednia: " << (sum_val.score / num_runs) << "\n";
+    //
+    // std::cout << " [MAKESPAN]\n";
+    // std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Srednia: " << (sum_val.makespan / num_runs) << "\n";
+    //
+    // std::cout << " [DEPTH]\n";
+    // std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Srednia: " << (static_cast<double>(sum_val.depth) / num_runs) << "\n";
+    //
+    // std::cout << " [SWAPS]\n";
+    // std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Srednia: " << (static_cast<double>(sum_val.swaps) / num_runs) << "\n";
+    //
+    // std::cout << " [MOVES]\n";
+    // std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Srednia: " << (static_cast<double>(sum_val.moves) / num_runs) << "\n";
+    //
+    // std::cout << " [CZAS WYKONANIA]\n";
+    // std::cout << " Min: " << min_val.execution_time << " | Max: " << max_val.execution_time << " | Srednia: " << (sum_val.execution_time / num_runs) << " sekund\n";
+    // std::cout << " Lacznie dla " << num_runs << " uruchomien: " << total_execution_time.count() << " sekund\n";
+    // std::cout << "============================================\n";
 }
 
 bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, const std::vector<RoutingRecord>& log, bool print_success) const {
@@ -858,17 +858,17 @@ bool SabreRouter::validate_logical_circuit(const std::vector<Gate>& orig_circ, c
     for (int i = 0; i < num_qubits; ++i) {
         if (expected[i] != actual[i]) {
             is_valid = false;
-            std::cout << "[BŁĄD WALIDACJI] Niezgodność na kubicie logicznym lq" << i << "!\n";
-            std::cout << "  Oczekiwano ID: ";
-            for (int id : expected[i]) std::cout << id << " ";
-            std::cout << "\n  Otrzymano ID:  ";
-            for (int id : actual[i]) std::cout << id << " ";
-            std::cout << "\n";
+            // std::cout << "[BŁĄD WALIDACJI] Niezgodność na kubicie logicznym lq" << i << "!\n";
+            // std::cout << "  Oczekiwano ID: ";
+            // for (int id : expected[i]) std::cout << id << " ";
+            // std::cout << "\n  Otrzymano ID:  ";
+            // for (int id : actual[i]) std::cout << id << " ";
+            // std::cout << "\n";
         }
     }
 
     if (is_valid && print_success) {
-        std::cout << "[OK] Walidacja pomyślna. Czystość logiczna (ID bramek z DAG) zachowana na 100% (SABRE)!\n";
+        // std::cout << "[OK] Walidacja pomyślna. Czystość logiczna (ID bramek z DAG) zachowana na 100% (SABRE)!\n";
     }
     return is_valid;
 }
