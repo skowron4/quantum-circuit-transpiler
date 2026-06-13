@@ -199,135 +199,135 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
 
 }
 
-//void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
-//    std::cout << "\n============================================\n";
-//    std::cout << "URUCHAMIAM TEST DLA TOPOLOGII: " << name << "\n";
-//    std::cout << "============================================\n";
-//    qpu.print_stats();
-//
-//    int logical_qubits_count = qpu.get_num_qubits() * 1.0;
-//    CircuitGenerator generator(qpu, logical_qubits_count, 1234);
-//
-//    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
-//    generator.print_gate_statistics(circuit);
-//    generator.print_circuit(circuit);
-//
-//    // --- Konfiguracja losowosci i liczby prob ---
-//    const bool use_random_seeds = true;
-//    std::random_device rd;
-//    const uint32_t sabre_seed = rd();
-//    const uint64_t hybrid_seed = sabre_seed;
-//    const int sabre_runs = 1;
-//    const int hybrid_runs = 5;
-//    const int hybrid_sabre_seed_trials = 1;
-//    const int sabre_lookahead_depth = 30;
-//    const int hybrid_lookahead_depth = 10;
-//    const int hybrid_pop_size = 30;
-//    const int hybrid_generations_per_window = 300;
-//    const int hybrid_window_size = 600;
-//    const double hybrid_accept_ratio = 0.35;
-//    const int hybrid_feedback_passes = 3;
-//    const bool hybrid_allow_lazy_offboard = false;
-//    const double hybrid_f = 0.8;
-//    const double hybrid_cr = 0.9;
-//
-//    SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name, sabre_lookahead_depth);
-//    sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
-//    sabre.run_benchmark_multiple(sabre_runs);
-//
-//    std::cout << "\n--- Rozpoczynam " << hybrid_runs << " iteracji dla DEHybridSabre ---\n";
-//
-//    std::vector<OptimizationResult> results;
-//    results.reserve(hybrid_runs);
-//
-//    for (int i = 0; i < hybrid_runs; ++i) {
-//        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, hybrid_lookahead_depth);
-//        SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
-//        SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
-//        OptimizationResult res = SabreDERouter.optimize_windowed(30, 100, 500, 0.6, false, 0.2);
-//
-//        // Odbieramy całą strukturę wyników
-////        OptimizationResult res = SabreDERouter.optimize_windowed_with_feedback(
-////            hybrid_pop_size,
-////            hybrid_generations_per_window,
-////            hybrid_window_size,
-////            hybrid_accept_ratio,
-////            hybrid_feedback_passes,
-////            hybrid_allow_lazy_offboard,
-////            hybrid_f,
-////            hybrid_cr
-////        );
-//        results.push_back(res);
-//
-//        std::cout << "Iteracja " << (i + 1) << " zakonczona. "
-//                  << "Wynik: " << res.score << ", "
-//                  << "SWAPy: " << res.swaps << ", "
-//                  << "Makespan: " << res.makespan << "\n";
-//    }
-//
-//    // --- OBLICZANIE STATYSTYK ---
-//    OptimizationResult min_val = results[0];
-//    OptimizationResult max_val = results[0];
-//    OptimizationResult sum_val = results[0];
-//    OptimizationResult best_result = results[0]; // Zmienna do śledzenia pojedynczego najlepszego wyniku
-//
-//    for (int i = 1; i < hybrid_runs; ++i) {
-//        // Zapisujemy całą instancję wyniku, jeśli ma lepszy (niższy) score
-//        if (results[i].score < best_result.score) {
-//            best_result = results[i];
-//        }
-//
-//        min_val.score = std::min(min_val.score, results[i].score);
-//        max_val.score = std::max(max_val.score, results[i].score);
-//        sum_val.score += results[i].score;
-//
-//        min_val.makespan = std::min(min_val.makespan, results[i].makespan);
-//        max_val.makespan = std::max(max_val.makespan, results[i].makespan);
-//        sum_val.makespan += results[i].makespan;
-//
-//        min_val.depth = std::min(min_val.depth, results[i].depth);
-//        max_val.depth = std::max(max_val.depth, results[i].depth);
-//        sum_val.depth += results[i].depth;
-//
-//        min_val.swaps = std::min(min_val.swaps, results[i].swaps);
-//        max_val.swaps = std::max(max_val.swaps, results[i].swaps);
-//        sum_val.swaps += results[i].swaps;
-//
-//        min_val.moves = std::min(min_val.moves, results[i].moves);
-//        max_val.moves = std::max(max_val.moves, results[i].moves);
-//        sum_val.moves += results[i].moves;
-//    }
-//
-//    std::cout << "\n============================================\n";
-//    std::cout << " PODSUMOWANIE DEHybridSabre (" << hybrid_runs << " uruchomien)\n";
-//    std::cout << "============================================\n";
-//
-//    // --- WYPISYWANIE NAJLEPSZEGO POJEDYNCZEGO WYNIKU ---
-//    std::cout << " [NAJLEPSZY ZNALEZIONY WYNIK (wg min Score)]\n";
-//    std::cout << " Score: " << best_result.score << "\n";
-//    std::cout << " Makespan: " << best_result.makespan << "\n";
-//    std::cout << " Depth: " << best_result.depth << "\n";
-//    std::cout << " Swaps: " << best_result.swaps << "\n";
-//    std::cout << " Moves: " << best_result.moves << "\n";
-//    std::cout << "--------------------------------------------\n";
-//
-//    std::cout << " [SCORE]\n";
-//    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Średnia: " << (sum_val.score / hybrid_runs) << "\n";
-//
-//    std::cout << " [MAKESPAN]\n";
-//    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Średnia: " << (sum_val.makespan / hybrid_runs) << "\n";
-//
-//    std::cout << " [DEPTH]\n";
-//    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Średnia: " << (static_cast<double>(sum_val.depth) / hybrid_runs) << "\n";
-//
-//    std::cout << " [SWAPS]\n";
-//    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Średnia: " << (static_cast<double>(sum_val.swaps) / hybrid_runs) << "\n";
-//
-//    std::cout << " [MOVES]\n";
-//    std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Średnia: " << (static_cast<double>(sum_val.moves) / hybrid_runs) << "\n";
-//    std::cout << "============================================\n";
-//}
-//
+void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
+    std::cout << "\n============================================\n";
+    std::cout << "URUCHAMIAM TEST DLA TOPOLOGII: " << name << "\n";
+    std::cout << "============================================\n";
+    qpu.print_stats();
+
+    int logical_qubits_count = qpu.get_num_qubits() * 1.0;
+    CircuitGenerator generator(qpu, logical_qubits_count, 1234);
+
+    std::vector<Gate> circuit = generator.generate(2000, 0.6, 0.4);
+    generator.print_gate_statistics(circuit);
+    generator.print_circuit(circuit);
+
+    // --- Konfiguracja losowosci i liczby prob ---
+    const bool use_random_seeds = true;
+    std::random_device rd;
+    const uint32_t sabre_seed = rd();
+    const uint64_t hybrid_seed = sabre_seed;
+    const int sabre_runs = 1;
+    const int hybrid_runs = 5;
+    const int hybrid_sabre_seed_trials = 1;
+    const int sabre_lookahead_depth = 30;
+    const int hybrid_lookahead_depth = 10;
+    const int hybrid_pop_size = 30;
+    const int hybrid_generations_per_window = 300;
+    const int hybrid_window_size = 600;
+    const double hybrid_accept_ratio = 0.35;
+    const int hybrid_feedback_passes = 3;
+    const bool hybrid_allow_lazy_offboard = false;
+    const double hybrid_f = 0.8;
+    const double hybrid_cr = 0.9;
+
+    SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name, sabre_lookahead_depth);
+    sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
+    sabre.run_benchmark_multiple(sabre_runs);
+
+    std::cout << "\n--- Rozpoczynam " << hybrid_runs << " iteracji dla DEHybridSabre ---\n";
+
+    std::vector<OptimizationResult> results;
+    results.reserve(hybrid_runs);
+
+    for (int i = 0; i < hybrid_runs; ++i) {
+        SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, hybrid_lookahead_depth);
+        SabreDERouter.set_random_seed(use_random_seeds ? rd() : hybrid_seed + i);
+        SabreDERouter.set_sabre_seed_trials(hybrid_sabre_seed_trials);
+        OptimizationResult res = SabreDERouter.optimize_windowed(30, 100, 500, 0.6, false, 0.2);
+
+        // Odbieramy całą strukturę wyników
+//        OptimizationResult res = SabreDERouter.optimize_windowed_with_feedback(
+//            hybrid_pop_size,
+//            hybrid_generations_per_window,
+//            hybrid_window_size,
+//            hybrid_accept_ratio,
+//            hybrid_feedback_passes,
+//            hybrid_allow_lazy_offboard,
+//            hybrid_f,
+//            hybrid_cr
+//        );
+        results.push_back(res);
+
+        std::cout << "Iteracja " << (i + 1) << " zakonczona. "
+                  << "Wynik: " << res.score << ", "
+                  << "SWAPy: " << res.swaps << ", "
+                  << "Makespan: " << res.makespan << "\n";
+    }
+
+    // --- OBLICZANIE STATYSTYK ---
+    OptimizationResult min_val = results[0];
+    OptimizationResult max_val = results[0];
+    OptimizationResult sum_val = results[0];
+    OptimizationResult best_result = results[0]; // Zmienna do śledzenia pojedynczego najlepszego wyniku
+
+    for (int i = 1; i < hybrid_runs; ++i) {
+        // Zapisujemy całą instancję wyniku, jeśli ma lepszy (niższy) score
+        if (results[i].score < best_result.score) {
+            best_result = results[i];
+        }
+
+        min_val.score = std::min(min_val.score, results[i].score);
+        max_val.score = std::max(max_val.score, results[i].score);
+        sum_val.score += results[i].score;
+
+        min_val.makespan = std::min(min_val.makespan, results[i].makespan);
+        max_val.makespan = std::max(max_val.makespan, results[i].makespan);
+        sum_val.makespan += results[i].makespan;
+
+        min_val.depth = std::min(min_val.depth, results[i].depth);
+        max_val.depth = std::max(max_val.depth, results[i].depth);
+        sum_val.depth += results[i].depth;
+
+        min_val.swaps = std::min(min_val.swaps, results[i].swaps);
+        max_val.swaps = std::max(max_val.swaps, results[i].swaps);
+        sum_val.swaps += results[i].swaps;
+
+        min_val.moves = std::min(min_val.moves, results[i].moves);
+        max_val.moves = std::max(max_val.moves, results[i].moves);
+        sum_val.moves += results[i].moves;
+    }
+
+    std::cout << "\n============================================\n";
+    std::cout << " PODSUMOWANIE DEHybridSabre (" << hybrid_runs << " uruchomien)\n";
+    std::cout << "============================================\n";
+
+    // --- WYPISYWANIE NAJLEPSZEGO POJEDYNCZEGO WYNIKU ---
+    std::cout << " [NAJLEPSZY ZNALEZIONY WYNIK (wg min Score)]\n";
+    std::cout << " Score: " << best_result.score << "\n";
+    std::cout << " Makespan: " << best_result.makespan << "\n";
+    std::cout << " Depth: " << best_result.depth << "\n";
+    std::cout << " Swaps: " << best_result.swaps << "\n";
+    std::cout << " Moves: " << best_result.moves << "\n";
+    std::cout << "--------------------------------------------\n";
+
+    std::cout << " [SCORE]\n";
+    std::cout << " Min: " << min_val.score << " | Max: " << max_val.score << " | Średnia: " << (sum_val.score / hybrid_runs) << "\n";
+
+    std::cout << " [MAKESPAN]\n";
+    std::cout << " Min: " << min_val.makespan << " | Max: " << max_val.makespan << " | Średnia: " << (sum_val.makespan / hybrid_runs) << "\n";
+
+    std::cout << " [DEPTH]\n";
+    std::cout << " Min: " << min_val.depth << " | Max: " << max_val.depth << " | Średnia: " << (static_cast<double>(sum_val.depth) / hybrid_runs) << "\n";
+
+    std::cout << " [SWAPS]\n";
+    std::cout << " Min: " << min_val.swaps << " | Max: " << max_val.swaps << " | Średnia: " << (static_cast<double>(sum_val.swaps) / hybrid_runs) << "\n";
+
+    std::cout << " [MOVES]\n";
+    std::cout << " Min: " << min_val.moves << " | Max: " << max_val.moves << " | Średnia: " << (static_cast<double>(sum_val.moves) / hybrid_runs) << "\n";
+    std::cout << "============================================\n";
+}
+
 // int main() {
 // #ifdef _WIN32
 //     // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
@@ -336,13 +336,13 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
 //     SetConsoleCP(CP_UTF8);
 // #endif
 //     // Topologia siatki 2x2
-//       IQMConstellation gridQpu(5, 5);
-////        run_test_for_topology(gridQpu, "Siatka 5x5");
-//       run_test_for_topologyII(gridQpu, "Siatka 5x5");
+//     // IQMConstellation gridQpu(5, 5);
+//     // run_test_for_topology(gridQpu, "Siatka 5x5");
+//     // run_test_for_topologyII(gridQpu, "Siatka 5x5");
 //
 //     // Topologia trójkątna
-////     IQMTriangleConstellation triangleQpu;
-////     run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
+//     // IQMTriangleConstellation triangleQpu;
+//     // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
 //     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
 //
 //     return 0;
@@ -367,7 +367,7 @@ struct ExperimentConfig {
     int random_pilot_layouts = 8;
     int random_tuning_instances_per_bucket = 2;
     int min_random_layouts = 5;
-    int max_random_layouts = 40;
+    int max_random_layouts = 20;
     double random_target_relative_error = 0.10;
     int hyperparam_training_instances_per_bucket = 3;
     int hyperparam_training_runs = 2;
@@ -1187,6 +1187,16 @@ int main(int argc, char* argv[]) {
     std::vector<CircuitMeta> base_metas;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(config.input_dir)) {
         if (entry.is_regular_file() && entry.path().extension() == ".json") {
+
+            // --- DODAJ TEN FRAGMENT ---
+            int temp_qubits = 0;
+            std::vector<Gate> check_circuit = CircuitIO::load_circuitII(entry.path().string(), temp_qubits);
+            // Limit NISQ: odrzucamy wszystko powyżej 2000 bramek
+            if (check_circuit.size() > 2000) {
+                continue;
+            }
+            // --------------------------
+
             files.push_back(entry.path());
             if (!is_routed_qiskit_file(entry.path())) {
                 CircuitMeta meta = make_circuit_meta(entry.path());
