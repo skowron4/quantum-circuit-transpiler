@@ -2759,7 +2759,7 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
 
     auto find_shared_resonator = [&](int p1, int p2) {
         int chosen_res = -1;
-f        double best_score = std::numeric_limits<double>::max();
+        double best_score = std::numeric_limits<double>::max();
         const auto& p2_res = topo.qubits[p2].connected_resonators;
 
         for (int r : topo.qubits[p1].connected_resonators) {
