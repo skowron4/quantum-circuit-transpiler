@@ -2759,16 +2759,22 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
 
     auto find_shared_resonator = [&](int p1, int p2) {
         int chosen_res = -1;
-        double best_r_time = std::numeric_limits<double>::max();
+f        double best_score = std::numeric_limits<double>::max();
         const auto& p2_res = topo.qubits[p2].connected_resonators;
 
         for (int r : topo.qubits[p1].connected_resonators) {
-            if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end() && r_time[r] < best_r_time) {
-                best_r_time = r_time[r];
-                chosen_res = r;
+            if (std::find(p2_res.begin(), p2_res.end(), r) != p2_res.end()) {
+                double score = r_time[r];
+                // Dodajemy tę samą karę co w Custom Sabre za zrzucanie obcego kubitu
+                if (res_occ[r] != -1 && res_occ[r] != p1 && res_occ[r] != p2) {
+                    score += 10000.0;
+                }
+                if (score < best_score) {
+                    best_score = score;
+                    chosen_res = r;
+                }
             }
         }
-
         return chosen_res;
     };
 
@@ -2872,12 +2878,22 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
             int lq1 = p2l[p1];
             int lq2 = p2l[p2];
 
-            final_log.push_back({OpType::SWAP, g.id, lq1, lq2, p1, p2, chosen_res, start_time});
-            out_swaps++;
-            total_routing_cost += SWAP_COST;
+            // --- POPRAWIONA LOGIKA KOSZTÓW ---
+            bool is_move = (lq1 == -1) || (lq2 == -1);
 
-            q_time[p1] = q_time[p2] = start_time + SWAP_COST;
-            r_time[chosen_res] = start_time + SWAP_COST;
+            if (is_move) {
+                out_moves += 2;
+                total_routing_cost += (2.0 * MOVE_COST);
+            } else {
+                out_swaps++;
+                total_routing_cost += SWAP_COST;
+            }
+            // ---------------------------------
+
+            final_log.push_back({OpType::SWAP, g.id, lq1, lq2, p1, p2, chosen_res, start_time});
+
+            q_time[p1] = q_time[p2] = start_time + (is_move ? (2.0 * MOVE_COST) : SWAP_COST);
+            r_time[chosen_res] = start_time + (is_move ? (2.0 * MOVE_COST) : SWAP_COST);
 
             int max_d = fast_max_hyb(q_depth[p1], q_depth[p2]) + 1;
             q_depth[p1] = q_depth[p2] = max_d;
