@@ -2732,7 +2732,7 @@ void SabreDEHybridRouter::export_moves_to_file(const std::vector<RoutingRecord>&
     // std::cout << ">>> Zapisano harmonogram (Hybryda 3.0) do: " << filename << "\n";
 }
 
-OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit) {
+OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit, const std::vector<int>& initial_l2p) {
     auto eval_start_time = std::chrono::high_resolution_clock::now();
     int p_cnt = topo.qubits.size();
     int r_cnt = topo.resonators.size();
@@ -2740,10 +2740,30 @@ OptimizationResult SabreDEHybridRouter::evaluate_qiskit_routed_circuit(const std
     // Qiskitowy SABRE zwraca operacje na fizycznych przewodach. Po SWAP-ach
     // trzeba jednak śledzić, który kubit logiczny aktualnie siedzi na danym przewodzie.
     std::vector<int> p2l(p_cnt, -1);
-    std::vector<int> l2p(std::max(num_qubits, p_cnt), -1);
-    for (int p = 0; p < p_cnt && p < num_qubits; ++p) {
-        p2l[p] = p;
-        l2p[p] = p;
+    std::vector<int> l2p(num_qubits, -1);
+
+    bool has_valid_qiskit_layout = static_cast<int>(initial_l2p.size()) >= num_qubits;
+    std::vector<uint8_t> used_physical(p_cnt, 0);
+    if (has_valid_qiskit_layout) {
+        for (int lq = 0; lq < num_qubits; ++lq) {
+            int p = initial_l2p[lq];
+            if (p < 0 || p >= p_cnt || used_physical[p]) {
+                has_valid_qiskit_layout = false;
+                break;
+            }
+            used_physical[p] = 1;
+            l2p[lq] = p;
+            p2l[p] = lq;
+        }
+    }
+
+    if (!has_valid_qiskit_layout) {
+        std::fill(p2l.begin(), p2l.end(), -1);
+        std::fill(l2p.begin(), l2p.end(), -1);
+        for (int p = 0; p < p_cnt && p < num_qubits; ++p) {
+            p2l[p] = p;
+            l2p[p] = p;
+        }
     }
 
     std::vector<int> q_on_res(p_cnt, -1);

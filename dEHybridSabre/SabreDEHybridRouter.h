@@ -341,7 +341,7 @@ public:
     int pop_size, int generations_per_window, int window_size, double accept_ratio,
     int feedback_passes, bool allow_lazy_offboard, double f, double cr);
     void optimize_with_feedback(int pop_size, int generations_per_pass, int feedback_passes, bool allow_lazy_offboard, double f, double cr);
-    OptimizationResult evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit);
+    OptimizationResult evaluate_qiskit_routed_circuit(const std::vector<Gate>& qiskit_circuit, const std::vector<int>& initial_l2p = {});
 };
 
 #endif //MAGISTERKA_SABREDEHYBRIDROUTER_H

@@ -413,6 +413,9 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import quantum_volume
 from qiskit.transpiler import CouplingMap
 
+QISKIT_SABRE_SEED = 1337
+QISKIT_BASIS_GATES = ['u', 'cx', 'swap']
+
 class QiskitCppBridge:
     def __init__(self):
         self.num_qubits = 0
@@ -447,21 +450,33 @@ class QiskitCppBridge:
         except Exception:
             return []
 
-    def _transpile_layout_metadata(self, qc: QuantumCircuit):
+    def _transpile_layout_metadata(self, qc: QuantumCircuit, logical_qubits=None):
         layout_info = getattr(qc, "layout", None)
         if layout_info is None:
             return {}
 
         initial_layout = getattr(layout_info, "initial_layout", None)
         final_layout = getattr(layout_info, "final_layout", None)
-        logical_qubits = len(getattr(initial_layout, "get_virtual_bits", lambda: {})()) if initial_layout is not None else qc.num_qubits
+        logical_qubits = logical_qubits or (
+            len(getattr(initial_layout, "get_virtual_bits", lambda: {})())
+            if initial_layout is not None else qc.num_qubits
+        )
 
         metadata = {}
-        initial_l2p = self._layout_to_l2p(initial_layout, logical_qubits)
+
+        initial_l2p = []
+        try:
+            initial_l2p = list(layout_info.initial_index_layout(filter_ancillas=True))[:logical_qubits]
+        except Exception:
+            initial_l2p = self._layout_to_l2p(initial_layout, logical_qubits)
         if initial_l2p:
             metadata["qiskit_initial_layout_l2p"] = initial_l2p
 
-        final_l2p = self._layout_to_l2p(final_layout, logical_qubits)
+        final_l2p = []
+        try:
+            final_l2p = list(layout_info.final_index_layout(filter_ancillas=True))[:logical_qubits]
+        except Exception:
+            final_l2p = self._layout_to_l2p(final_layout, logical_qubits)
         if final_l2p:
             metadata["qiskit_final_layout_l2p"] = final_l2p
 
@@ -481,17 +496,18 @@ class QiskitCppBridge:
                 "qubits": qubits
             })
 
-        metadata = self._transpile_layout_metadata(qc)
+        metadata = self._transpile_layout_metadata(qc, self.num_qubits)
         logical_qubits = len(metadata.get("qiskit_initial_layout_l2p", [])) or self.num_qubits
         with open(filename, "w") as f:
             json.dump({
                 "num_qubits": self.num_qubits,
                 "logical_qubits": logical_qubits,
+                "physical_qubits": self.num_qubits,
                 **metadata,
                 "gates": export_data
             }, f, indent=4)
 
-    def export_transpiled_to_cpp(self, qc: QuantumCircuit, filename: str):
+    def export_transpiled_to_cpp(self, qc: QuantumCircuit, filename: str, logical_qubits: int):
         self.num_qubits = qc.num_qubits
         export_data = []
 
@@ -512,8 +528,15 @@ class QiskitCppBridge:
                 "qubits": qubits
             })
 
+        metadata = self._transpile_layout_metadata(qc, logical_qubits)
         with open(filename, "w") as f:
-            json.dump({"num_qubits": self.num_qubits, "gates": export_data}, f, indent=4)
+            json.dump({
+                "num_qubits": logical_qubits,
+                "logical_qubits": logical_qubits,
+                "physical_qubits": self.num_qubits,
+                **metadata,
+                "gates": export_data
+            }, f, indent=4)
 
 
 # =====================================================================
@@ -606,6 +629,23 @@ def get_iqm_topology_edges_and_size(target_logical_qubits):
         return edges, phys_q_count
 
 
+def transpile_with_qiskit_sabre(qc: QuantumCircuit, cmap: CouplingMap) -> QuantumCircuit:
+    """
+    Routing-only SABRE baseline: znajdź layout i SWAP-y, ale nie uruchamiaj
+    passów optymalizujących/usuwających bramki logiczne z obwodu.
+    Qiskitowy routing_method='sabre' używa heurystyki decay, czyli lookahead + decay.
+    """
+    return transpile(
+        qc,
+        coupling_map=cmap,
+        layout_method='sabre',
+        routing_method='sabre',
+        optimization_level=0,
+        seed_transpiler=QISKIT_SABRE_SEED,
+        basis_gates=QISKIT_BASIS_GATES,
+    )
+
+
 # =====================================================================
 # --- GENERATOR OBWODÓW ---
 # =====================================================================
@@ -623,7 +663,7 @@ def generate_circuit_for_style(num_qubits, target_gates, circuit_style, hw_edges
 
         for layer in range(num_layers):
             for q in range(num_qubits):
-                qc.rx(0, q)
+                qc.rx(1.57, q)
             selected_edges = valid_edges if layer % 2 == 0 else reversed(valid_edges)
             for edge in selected_edges:
                 qc.cx(edge[0], edge[1])
@@ -645,7 +685,7 @@ def generate_circuit_for_style(num_qubits, target_gates, circuit_style, hw_edges
 
         for layer in range(num_layers):
             for q in range(num_qubits):
-                qc.rx(0, q)
+                qc.rx(1.57, q)
             for edge in problem_edges:
                 qc.cx(edge[0], edge[1])
 
@@ -663,7 +703,7 @@ def generate_circuit_for_style(num_qubits, target_gates, circuit_style, hw_edges
             target_qubits = num_qubits - counting_qubits
 
             for i in range(counting_qubits):
-                qc.rx(0, i)
+                qc.rx(1.57, i)
             for i in range(counting_qubits):
                 for j in range(target_qubits):
                     qc.cx(i, counting_qubits + j)
@@ -719,11 +759,11 @@ def generate_iqm_benchmark_suite(bridge: QiskitCppBridge, base_dir: str = "iqm_b
                     bridge.export_to_cpp(qc, filepath)
                     total_exported += 1
 
-                    qc_sabre = transpile(qc, coupling_map=cmap, routing_method='sabre', optimization_level=0, basis_gates=['u', 'cx', 'swap'])
+                    qc_sabre = transpile_with_qiskit_sabre(qc, cmap)
                     swaps_added = qc_sabre.count_ops().get('swap', 0)
 
                     filepath_qiskit = os.path.join(g_dir, f"{style}_{q}q_{g}g_qiskit_routed.json")
-                    bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit)
+                    bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q)
 
                     print(f"  ├── [ {q}Q | {g}G | {style} ] Sabre dodał: {swaps_added} SWAP")
 
@@ -743,11 +783,11 @@ def generate_iqm_benchmark_suite(bridge: QiskitCppBridge, base_dir: str = "iqm_b
                 bridge.export_to_cpp(qc, filepath)
                 total_exported += 1
 
-                qc_sabre = transpile(qc, coupling_map=cmap, routing_method='sabre', optimization_level=0, basis_gates=['u', 'cx', 'swap'])
+                qc_sabre = transpile_with_qiskit_sabre(qc, cmap)
                 swaps_added = qc_sabre.count_ops().get('swap', 0)
 
                 filepath_qiskit = os.path.join(algo_dir, f"{style}_{q}q_{actual_gates}g_qiskit_routed.json")
-                bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit)
+                bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q)
 
                 print(f"  └── [ {q}Q | {actual_gates}G (Natywne) | {style} ] Sabre dodał: {swaps_added} SWAP")
 

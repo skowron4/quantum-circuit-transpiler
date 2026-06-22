@@ -28,6 +28,13 @@
 #include <omp.h>
 #include "greedy/GreedyASAP.h"
 
+struct CircuitFileMetadata {
+    int logical_qubits = 0;
+    int physical_qubits = 0;
+    std::vector<int> qiskit_initial_layout_l2p;
+    std::vector<int> qiskit_final_layout_l2p;
+};
+
 class CircuitIO {
 public:
     static std::vector<Gate> load_circuit(const std::string& filename, int& out_num_qubits) {
@@ -38,7 +45,7 @@ public:
         }
 
         nlohmann::json j; file >> j;
-        out_num_qubits = j["num_qubits"];
+        out_num_qubits = j.value("logical_qubits", j["num_qubits"].get<int>());
         std::vector<Gate> circuit;
 
         for (const auto& item : j["gates"]) {
@@ -75,7 +82,7 @@ public:
             return {};
         }
 
-        out_num_qubits = j["num_qubits"];
+        out_num_qubits = j.value("logical_qubits", j["num_qubits"].get<int>());
         std::vector<Gate> circuit;
 
         for (const auto& item : j["gates"]) {
@@ -103,6 +110,35 @@ public:
         }
 
         return circuit;
+    }
+
+    static CircuitFileMetadata load_metadata(const std::string& filename) {
+        CircuitFileMetadata metadata;
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Blad otwarcia pliku metadanych: " << filename << "\n";
+            return metadata;
+        }
+
+        nlohmann::json j;
+        try {
+            file >> j;
+        } catch (const nlohmann::json::parse_error& e) {
+            std::cerr << "Blad parsowania metadanych JSON w pliku " << filename << ": " << e.what() << "\n";
+            return metadata;
+        }
+
+        metadata.logical_qubits = j.value("logical_qubits", j.value("num_qubits", 0));
+        metadata.physical_qubits = j.value("physical_qubits", j.value("num_qubits", metadata.logical_qubits));
+
+        if (j.contains("qiskit_initial_layout_l2p") && j["qiskit_initial_layout_l2p"].is_array()) {
+            metadata.qiskit_initial_layout_l2p = j["qiskit_initial_layout_l2p"].get<std::vector<int>>();
+        }
+        if (j.contains("qiskit_final_layout_l2p") && j["qiskit_final_layout_l2p"].is_array()) {
+            metadata.qiskit_final_layout_l2p = j["qiskit_final_layout_l2p"].get<std::vector<int>>();
+        }
+
+        return metadata;
     }
 
     static void save_circuit(const std::string& filename, const std::vector<RoutingRecord>& log) {
@@ -1479,17 +1515,24 @@ static void process_qiskit_routed_file(const std::filesystem::path& input_file, 
     int logical_qubits = 0;
     std::vector<Gate> qiskit_circuit = CircuitIO::load_circuitII(input_file.string(), logical_qubits);
     if (qiskit_circuit.empty()) return;
+    CircuitFileMetadata metadata = CircuitIO::load_metadata(input_file.string());
 
     std::string topology_name;
     auto topology = make_topology_for_qubits(logical_qubits, topology_name);
     HybridRunParams params = params_for_circuit(learned_params, static_cast<int>(qiskit_circuit.size()), logical_qubits, topology->get_num_qubits());
 
-    SabreDEHybridRouter evaluator(*topology, qiskit_circuit, logical_qubits, "qiskit_eval", false, params.lookahead_depth);
+    std::vector<Gate> empty_logical_circuit;
+    SabreDEHybridRouter evaluator(*topology, empty_logical_circuit, logical_qubits, "qiskit_eval", false, params.lookahead_depth);
     evaluator.set_random_seed(config.base_seed);
-    OptimizationResult qiskit_result = evaluator.evaluate_qiskit_routed_circuit(qiskit_circuit);
+    OptimizationResult qiskit_result = evaluator.evaluate_qiskit_routed_circuit(qiskit_circuit, metadata.qiskit_initial_layout_l2p);
 
-    LayoutCandidate qiskit_layout{"qiskit_final_layout_in_file", 0, 0,
-                                  make_identity_layout(logical_qubits, topology->get_num_qubits()), 0.0};
+    std::vector<int> qiskit_initial_layout = metadata.qiskit_initial_layout_l2p;
+    if (!validate_mapping(qiskit_initial_layout, logical_qubits, topology->get_num_qubits())) {
+        qiskit_initial_layout = make_identity_layout(logical_qubits, topology->get_num_qubits());
+    }
+    LayoutCandidate qiskit_layout{"qiskit_sabre_initial_layout", 0, 0,
+                                  qiskit_initial_layout,
+                                  0.0};
 
     // ZMIANA: Zapis do bufora i jednorazowy zrzut
     std::ostringstream local_results;
