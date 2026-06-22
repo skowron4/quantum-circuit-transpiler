@@ -414,6 +414,7 @@ from qiskit.circuit.library import quantum_volume
 from qiskit.transpiler import CouplingMap
 
 QISKIT_SABRE_SEED = 1337
+QISKIT_SABRE_TRIALS = 20
 QISKIT_BASIS_GATES = ['u', 'cx', 'swap']
 
 class QiskitCppBridge:
@@ -507,7 +508,7 @@ class QiskitCppBridge:
                 "gates": export_data
             }, f, indent=4)
 
-    def export_transpiled_to_cpp(self, qc: QuantumCircuit, filename: str, logical_qubits: int):
+    def export_transpiled_to_cpp(self, qc: QuantumCircuit, filename: str, logical_qubits: int, extra_metadata=None):
         self.num_qubits = qc.num_qubits
         export_data = []
 
@@ -529,6 +530,8 @@ class QiskitCppBridge:
             })
 
         metadata = self._transpile_layout_metadata(qc, logical_qubits)
+        if extra_metadata:
+            metadata.update(extra_metadata)
         with open(filename, "w") as f:
             json.dump({
                 "num_qubits": logical_qubits,
@@ -629,21 +632,43 @@ def get_iqm_topology_edges_and_size(target_logical_qubits):
         return edges, phys_q_count
 
 
-def transpile_with_qiskit_sabre(qc: QuantumCircuit, cmap: CouplingMap) -> QuantumCircuit:
+def transpile_with_qiskit_sabre(qc: QuantumCircuit, cmap: CouplingMap):
     """
     Routing-only SABRE baseline: znajdź layout i SWAP-y, ale nie uruchamiaj
     passów optymalizujących/usuwających bramki logiczne z obwodu.
     Qiskitowy routing_method='sabre' używa heurystyki decay, czyli lookahead + decay.
     """
-    return transpile(
-        qc,
-        coupling_map=cmap,
-        layout_method='sabre',
-        routing_method='sabre',
-        optimization_level=0,
-        seed_transpiler=QISKIT_SABRE_SEED,
-        basis_gates=QISKIT_BASIS_GATES,
-    )
+    best_qc = None
+    best_seed = QISKIT_SABRE_SEED
+    best_score = None
+
+    for trial in range(QISKIT_SABRE_TRIALS):
+        seed = QISKIT_SABRE_SEED + trial
+        routed = transpile(
+            qc,
+            coupling_map=cmap,
+            layout_method='sabre',
+            routing_method='sabre',
+            optimization_level=0,
+            seed_transpiler=seed,
+            basis_gates=QISKIT_BASIS_GATES,
+        )
+
+        ops = routed.count_ops()
+        # Qiskit nie zna kosztu MOVE z modelu rezonatorowego, więc wybieramy
+        # przede wszystkim najmniej abstrakcyjnych SWAP-ów, a potem mniejszy obwód.
+        score = (ops.get('swap', 0), len(routed.data), routed.depth())
+        if best_score is None or score < best_score:
+            best_qc = routed
+            best_seed = seed
+            best_score = score
+
+    return best_qc, {
+        "qiskit_sabre_seed": best_seed,
+        "qiskit_sabre_trials": QISKIT_SABRE_TRIALS,
+        "qiskit_sabre_selection": "min_swap_then_gate_count_then_depth",
+        "qiskit_sabre_selected_swaps": int(best_score[0]),
+    }
 
 
 # =====================================================================
@@ -759,11 +784,11 @@ def generate_iqm_benchmark_suite(bridge: QiskitCppBridge, base_dir: str = "iqm_b
                     bridge.export_to_cpp(qc, filepath)
                     total_exported += 1
 
-                    qc_sabre = transpile_with_qiskit_sabre(qc, cmap)
+                    qc_sabre, sabre_metadata = transpile_with_qiskit_sabre(qc, cmap)
                     swaps_added = qc_sabre.count_ops().get('swap', 0)
 
                     filepath_qiskit = os.path.join(g_dir, f"{style}_{q}q_{g}g_qiskit_routed.json")
-                    bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q)
+                    bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q, sabre_metadata)
 
                     print(f"  ├── [ {q}Q | {g}G | {style} ] Sabre dodał: {swaps_added} SWAP")
 
@@ -783,11 +808,11 @@ def generate_iqm_benchmark_suite(bridge: QiskitCppBridge, base_dir: str = "iqm_b
                 bridge.export_to_cpp(qc, filepath)
                 total_exported += 1
 
-                qc_sabre = transpile_with_qiskit_sabre(qc, cmap)
+                qc_sabre, sabre_metadata = transpile_with_qiskit_sabre(qc, cmap)
                 swaps_added = qc_sabre.count_ops().get('swap', 0)
 
                 filepath_qiskit = os.path.join(algo_dir, f"{style}_{q}q_{actual_gates}g_qiskit_routed.json")
-                bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q)
+                bridge.export_transpiled_to_cpp(qc_sabre, filepath_qiskit, q, sabre_metadata)
 
                 print(f"  └── [ {q}Q | {actual_gates}G (Natywne) | {style} ] Sabre dodał: {swaps_added} SWAP")
 
