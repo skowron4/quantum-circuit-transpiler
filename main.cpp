@@ -1709,9 +1709,9 @@ int main(int argc, char* argv[]) {
 
             int temp_qubits = 0;
             std::vector<Gate> check_circuit = CircuitIO::load_circuitII(entry.path().string(), temp_qubits);
-            if (check_circuit.size() > 2000) {
-                continue;
-            }
+            // if (check_circuit.size() > 2000) {
+            //     continue;
+            // }
 
             files.push_back(entry.path());
             if (!is_routed_qiskit_file(entry.path())) {
