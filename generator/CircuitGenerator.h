@@ -153,14 +153,14 @@ public:
             }
         }
 
-        std::cout << "\n=== WIZUALIZACJA OBWODU KWANTOWEGO ===\n";
-        std::cout << "Oznaczenia kubitów: [L] - Logiczny (Zajęty) | [E] - Pusty (Dostępny dla MOVE)\n";
-        std::cout << "Legenda bramek:   --o--/-(+)- [Lokalna] | --*--/-[+]- [Globalna - wymaga routingu]\n\n";
-
-        for (int i = 0; i < num_physical_qubits; ++i) {
-            std::cout << lines[i].str() << "\n";
-        }
-        std::cout << "======================================\n\n";
+        // std::cout << "\n=== WIZUALIZACJA OBWODU KWANTOWEGO ===\n";
+        // std::cout << "Oznaczenia kubitów: [L] - Logiczny (Zajęty) | [E] - Pusty (Dostępny dla MOVE)\n";
+        // std::cout << "Legenda bramek:   --o--/-(+)- [Lokalna] | --*--/-[+]- [Globalna - wymaga routingu]\n\n";
+        //
+        // for (int i = 0; i < num_physical_qubits; ++i) {
+        //     std::cout << lines[i].str() << "\n";
+        // }
+        // std::cout << "======================================\n\n";
     }
 
     void link_gates(std::vector<Gate>& circuit) {

@@ -210,9 +210,9 @@ void run_test_for_topology(const BaseTopology &qpu, const std::string &name) {
     // de_router.optimize_windowed(100, 30000, 200, 1.0, qpu.get_num_qubits()); //30, 1000, 100, 0.35
 
     // 3. Wykonanie algorytmu SABRE
-    SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name, sabre_lookahead_depth);
-    sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
-    sabre.run_benchmark_multiple(sabre_runs);
+    // SabreRouter sabre(qpu, circuit, qpu.get_num_qubits(), name, sabre_lookahead_depth);
+    // sabre.set_random_seed(use_random_seeds ? rd() : sabre_seed);
+    // sabre.run_benchmark_multiple(sabre_runs);
 
     // 4. Wykonanie algorytmu DEHybridSabre
     SabreDEHybridRouter SabreDERouter(qpu, circuit, qpu.get_num_qubits(), name, false, hybrid_lookahead_depth);
@@ -365,25 +365,25 @@ void run_test_for_topologyII(const BaseTopology &qpu, const std::string &name) {
     std::cout << "============================================\n";
 }
 
-// int main() {
-// #ifdef _WIN32
-//     // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
-//     SetConsoleOutputCP(CP_UTF8);
-//     // Opcjonalnie: upewnia się, że wejście (cin) też używa UTF-8
-//     SetConsoleCP(CP_UTF8);
-// #endif
-//     // Topologia siatki 2x2
-//     // IQMConstellation gridQpu(5, 5);
-//     // run_test_for_topology(gridQpu, "Siatka 5x5");
-//     // run_test_for_topologyII(gridQpu, "Siatka 5x5");
-//
-//     // Topologia trójkątna
-//     // IQMTriangleConstellation triangleQpu;
-//     // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
-//     // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
-//
-//     return 0;
-// }
+int main() {
+#ifdef _WIN32
+    // Windows potrzebuje instrukcji zmiany kodowania na UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    // Opcjonalnie: upewnia się, że wejście (cin) też używa UTF-8
+    SetConsoleCP(CP_UTF8);
+#endif
+    // Topologia siatki 2x2
+    IQMConstellation gridQpu(5, 5);
+    run_test_for_topology(gridQpu, "Siatka 5x5");
+    // run_test_for_topologyII(gridQpu, "Siatka 5x5");
+
+    // Topologia trójkątna
+    // IQMTriangleConstellation triangleQpu;
+    // run_test_for_topology(triangleQpu, "Trójkąt 3-Rezonatory");
+    // run_test_for_topologyII(triangleQpu, "Trójkąt 3-Rezonatory");
+
+    return 0;
+}
 
 //int main(int argc, char* argv[]) {
 //    // Domyślny folder z wygenerowanymi benchmarkami
@@ -1670,116 +1670,116 @@ static void process_base_circuit_file(const std::filesystem::path& input_file, c
     results_csv.write_chunk(local_results_buffer.str());
 }
 
-int main(int argc, char* argv[]) {
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#endif
-
-    ExperimentConfig config;
-    if (argc >= 2) config.input_dir = argv[1];
-    if (argc >= 3) config.results_dir = argv[2];
-
-    if (!std::filesystem::exists(config.input_dir) || !std::filesystem::is_directory(config.input_dir)) {
-        std::cerr << "Blad: katalog benchmarkow nie istnieje: " << config.input_dir << "\n";
-        return -1;
-    }
-
-    CsvWriter results_csv(
-        config.results_dir / "routing_runs.csv",
-        "circuit_id,circuit_path,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,router,run_id,run_seed,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,score,makespan,execution_time_s,depth,swaps,moves"
-    );
-    CsvWriter layouts_csv(
-        config.results_dir / "layouts.csv",
-        "circuit_id,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,mapping_l2p"
-    );
-    CsvWriter tuning_csv(
-        config.results_dir / "random_layout_tuning.csv",
-        "circuit_id,training_bucket,logical_qubits,gates,pilot_layouts,mean_score,sd_score,raw_estimated_random_layouts,used_random_layouts,metric"
-    );
-    CsvWriter hyperparam_csv(
-        config.results_dir / "hyperparameter_tuning.csv",
-        "training_bucket,circuit_id,circuit_path,logical_qubits,gates,candidate_id,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,run_id,seed,score,makespan,execution_time_s,depth,swaps,moves,objective,selected"
-    );
-
-    std::vector<std::filesystem::path> files;
-    std::vector<CircuitMeta> base_metas;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(config.input_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".json") {
-
-            int temp_qubits = 0;
-            std::vector<Gate> check_circuit = CircuitIO::load_circuitII(entry.path().string(), temp_qubits);
-            // if (check_circuit.size() > 2000) {
-            //     continue;
-            // }
-
-            files.push_back(entry.path());
-            if (!is_routed_qiskit_file(entry.path())) {
-                CircuitMeta meta = make_circuit_meta(entry.path());
-                if (meta.gate_count > 0 && meta.logical_qubits > 0) {
-                    base_metas.push_back(meta);
-                }
-            }
-        }
-    }
-
-    std::sort(files.begin(), files.end());
-    std::sort(base_metas.begin(), base_metas.end(), [](const CircuitMeta& a, const CircuitMeta& b) {
-        if (a.training_bucket != b.training_bucket) return a.training_bucket < b.training_bucket;
-        if (a.gate_count != b.gate_count) return a.gate_count < b.gate_count;
-        return a.circuit_id < b.circuit_id;
-    });
-
-    auto training_circuits = select_training_circuits(base_metas, config);
-    auto learned_params = tune_hyperparameters(training_circuits, config, hyperparam_csv);
-
-    // --- NOWE: Wypisywanie wyników tuningu do konsoli ---
-    std::cout << "\n--- ZAKONCZONO TUNING HYPERPARAMETROW ---\n";
-    for (const auto& [bucket, params] : learned_params) {
-        std::cout << "Baza [" << bucket << "] -> Zwyciezca: " << params.profile
-                  << " (Pop: " << params.pop_size
-                  << ", Gen: " << params.generations_per_window
-                  << ", Window: " << params.window_size << ")\n";
-    }
-    std::cout << "-----------------------------------------\n\n";
-
-    std::map<std::string, int> random_tuned_instances_by_bucket;
-    std::map<std::string, int> random_layout_count_by_bucket;
-
-    int max_threads = omp_get_max_threads();
-    std::cout << "\nRozpoczynam zrownoleglone przetwarzanie na " << max_threads << " watkach.\n";
-
-    std::atomic<int> processed_files{0};
-    int total_files = static_cast<int>(files.size());
-
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int i = 0; i < total_files; ++i) {
-        const auto& input_file = files[i];
-
-        if (is_routed_qiskit_file(input_file)) {
-            process_qiskit_routed_file(input_file, config, learned_params, results_csv);
-        } else {
-            process_base_circuit_file(input_file, config, learned_params, results_csv, layouts_csv, tuning_csv,
-                                      random_tuned_instances_by_bucket, random_layout_count_by_bucket);
-        }
-
-        // --- NOWE: Lekkie logowanie postępu (nadpisuje jedną linię w konsoli) ---
-        int done = ++processed_files;
-        if (done % 10 == 0 || done == total_files) {
-            // Budujemy cały napis w pamięci, dodając spacje na końcu do wyczyszczenia bufora
-            std::string msg = "\rPostep: " + std::to_string(done) + " / " + std::to_string(total_files) +
-                              " (" + std::to_string(done * 100 / total_files) + "%) plikow przetworzonych.   ";
-            #pragma omp critical(console_log)
-            {
-                // Wysyłamy gotowy ciąg znaków w jednej atomowej operacji
-                std::cout << msg << std::flush;
-            }
-        }
-    }
-
-    std::cout << "\nPrzetwarzanie zakonczone z sukcesem!\n";
-    return 0;
-}
+// int main(int argc, char* argv[]) {
+// #ifdef _WIN32
+//     SetConsoleOutputCP(CP_UTF8);
+//     SetConsoleCP(CP_UTF8);
+// #endif
+//
+//     ExperimentConfig config;
+//     if (argc >= 2) config.input_dir = argv[1];
+//     if (argc >= 3) config.results_dir = argv[2];
+//
+//     if (!std::filesystem::exists(config.input_dir) || !std::filesystem::is_directory(config.input_dir)) {
+//         std::cerr << "Blad: katalog benchmarkow nie istnieje: " << config.input_dir << "\n";
+//         return -1;
+//     }
+//
+//     CsvWriter results_csv(
+//         config.results_dir / "routing_runs.csv",
+//         "circuit_id,circuit_path,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,router,run_id,run_seed,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,score,makespan,execution_time_s,depth,swaps,moves"
+//     );
+//     CsvWriter layouts_csv(
+//         config.results_dir / "layouts.csv",
+//         "circuit_id,topology,logical_qubits,gates,layout_strategy,layout_id,layout_seed,layout_connectivity_score,mapping_l2p"
+//     );
+//     CsvWriter tuning_csv(
+//         config.results_dir / "random_layout_tuning.csv",
+//         "circuit_id,training_bucket,logical_qubits,gates,pilot_layouts,mean_score,sd_score,raw_estimated_random_layouts,used_random_layouts,metric"
+//     );
+//     CsvWriter hyperparam_csv(
+//         config.results_dir / "hyperparameter_tuning.csv",
+//         "training_bucket,circuit_id,circuit_path,logical_qubits,gates,candidate_id,param_profile,pop_size,generations_per_window,window_size,accept_ratio,lazy_offboard,f,cr,lookahead_depth,run_id,seed,score,makespan,execution_time_s,depth,swaps,moves,objective,selected"
+//     );
+//
+//     std::vector<std::filesystem::path> files;
+//     std::vector<CircuitMeta> base_metas;
+//     for (const auto& entry : std::filesystem::recursive_directory_iterator(config.input_dir)) {
+//         if (entry.is_regular_file() && entry.path().extension() == ".json") {
+//
+//             int temp_qubits = 0;
+//             std::vector<Gate> check_circuit = CircuitIO::load_circuitII(entry.path().string(), temp_qubits);
+//             // if (check_circuit.size() > 2000) {
+//             //     continue;
+//             // }
+//
+//             files.push_back(entry.path());
+//             if (!is_routed_qiskit_file(entry.path())) {
+//                 CircuitMeta meta = make_circuit_meta(entry.path());
+//                 if (meta.gate_count > 0 && meta.logical_qubits > 0) {
+//                     base_metas.push_back(meta);
+//                 }
+//             }
+//         }
+//     }
+//
+//     std::sort(files.begin(), files.end());
+//     std::sort(base_metas.begin(), base_metas.end(), [](const CircuitMeta& a, const CircuitMeta& b) {
+//         if (a.training_bucket != b.training_bucket) return a.training_bucket < b.training_bucket;
+//         if (a.gate_count != b.gate_count) return a.gate_count < b.gate_count;
+//         return a.circuit_id < b.circuit_id;
+//     });
+//
+//     auto training_circuits = select_training_circuits(base_metas, config);
+//     auto learned_params = tune_hyperparameters(training_circuits, config, hyperparam_csv);
+//
+//     // --- NOWE: Wypisywanie wyników tuningu do konsoli ---
+//     std::cout << "\n--- ZAKONCZONO TUNING HYPERPARAMETROW ---\n";
+//     for (const auto& [bucket, params] : learned_params) {
+//         std::cout << "Baza [" << bucket << "] -> Zwyciezca: " << params.profile
+//                   << " (Pop: " << params.pop_size
+//                   << ", Gen: " << params.generations_per_window
+//                   << ", Window: " << params.window_size << ")\n";
+//     }
+//     std::cout << "-----------------------------------------\n\n";
+//
+//     std::map<std::string, int> random_tuned_instances_by_bucket;
+//     std::map<std::string, int> random_layout_count_by_bucket;
+//
+//     int max_threads = omp_get_max_threads();
+//     std::cout << "\nRozpoczynam zrownoleglone przetwarzanie na " << max_threads << " watkach.\n";
+//
+//     std::atomic<int> processed_files{0};
+//     int total_files = static_cast<int>(files.size());
+//
+//     #pragma omp parallel for schedule(dynamic, 1)
+//     for (int i = 0; i < total_files; ++i) {
+//         const auto& input_file = files[i];
+//
+//         if (is_routed_qiskit_file(input_file)) {
+//             process_qiskit_routed_file(input_file, config, learned_params, results_csv);
+//         } else {
+//             process_base_circuit_file(input_file, config, learned_params, results_csv, layouts_csv, tuning_csv,
+//                                       random_tuned_instances_by_bucket, random_layout_count_by_bucket);
+//         }
+//
+//         // --- NOWE: Lekkie logowanie postępu (nadpisuje jedną linię w konsoli) ---
+//         int done = ++processed_files;
+//         if (done % 10 == 0 || done == total_files) {
+//             // Budujemy cały napis w pamięci, dodając spacje na końcu do wyczyszczenia bufora
+//             std::string msg = "\rPostep: " + std::to_string(done) + " / " + std::to_string(total_files) +
+//                               " (" + std::to_string(done * 100 / total_files) + "%) plikow przetworzonych.   ";
+//             #pragma omp critical(console_log)
+//             {
+//                 // Wysyłamy gotowy ciąg znaków w jednej atomowej operacji
+//                 std::cout << msg << std::flush;
+//             }
+//         }
+//     }
+//
+//     std::cout << "\nPrzetwarzanie zakonczone z sukcesem!\n";
+//     return 0;
+// }
 
 // int main(int argc, char* argv[]) {
 // #ifdef _WIN32

@@ -998,10 +998,10 @@ inline void SabreDEHybridRouter::save_state_to_snapshot(const DERunContext& ctx,
 }
 
 inline void SabreDEHybridRouter::select_distinct_parents(int pop_size, int current_idx, int& a, int& b, int& c, boost::random::xoshiro256pp& rng) {
-    boost::random::uniform_int_distribution<int> dist_int(0, pop_size - 1);
+    std::uniform_int_distribution<int> dist_int(0, pop_size - 1); //boost::random::uniform_int_distribution<int>
     do { a = dist_int(rng); } while (a == current_idx);
     do { b = dist_int(rng); } while (b == current_idx || b == a);
-    do { c = dist_int(rng); } while (c == current_idx || c == a || c == b);
+    do { c = dist_int(rng); } while (c == current_idx || c == a || c == b); //zmiana na pooling
 }
 
 // ==============================================================================
@@ -1221,9 +1221,9 @@ void SabreDEHybridRouter::run_standard_evolution_loop(std::vector<double>& pop, 
             int a, b, c;
             select_distinct_parents(pop_size, i, a, b, c, rng); // Ponowne wykorzystanie Twojej istniejącej metody
 
-            int R = boost::random::uniform_int_distribution<int>(0, n_genes - 1)(rng);
+            int R = std::uniform_int_distribution<int>(0, n_genes - 1)(rng);
             for (int j = 0; j < n_genes; ++j) {
-                bool mutate = (dist_real(rng) < cr || j == R);
+                bool mutate = (dist_real(rng) < cr || j == R); //bernuli dist
                 trial[j] = mutate ? std::clamp(pop[a * n_genes + j] + f * (pop[b * n_genes + j] - pop[c * n_genes + j]), 0.0, 1.0) : pop[i * n_genes + j];
             }
 
@@ -1341,7 +1341,7 @@ OptimizationResult SabreDEHybridRouter::finalize_optimization_result(const std::
     // std::cout << "===================================\n";
 
     double execution_time = std::chrono::duration<double>(end_time - start_time).count();
-    // print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, execution_time);
+    print_statistics(final_score, final_makespan, final_depth, final_swaps, final_moves, execution_time);
     export_moves_to_file(final_log, "../hybrid_schedule_moves_" + name + ".txt");
 
     return {final_score, final_makespan, execution_time, final_depth, final_swaps, final_moves};
@@ -1359,12 +1359,8 @@ void SabreDEHybridRouter::run_evolution_loop_windowed(std::vector<double>& pop, 
         for (int i = 0; i < pop_size; ++i) {
             int a, b, c;
             select_distinct_parents(pop_size, i, a, b, c, rng);
-
             generate_trial_vector_windowed(pop, trial, i, a, b, c, n_genes, n_gates, f, cr, rng, w_start, w_end, gate_time_map, snapshot);
-
-            // Snapshot służy tylko do ładowania! save_snapshot dajemy na nullptr.
             double trial_fit = evaluate_fitness_impl<false>(trial.data(), d_s, d_m, d_t, d_d, nullptr, can_lazy, snapshot, nullptr);
-
             if (trial_fit < fitness[i]) {
                 std::copy(trial.begin(), trial.end(), pop.begin() + i * n_genes);
                 fitness[i] = trial_fit;
@@ -1413,19 +1409,46 @@ void SabreDEHybridRouter::generate_trial_vector_windowed(const std::vector<doubl
     const double *p_c = pop.data() + c * n_genes;
     const double *p_curr = pop.data() + current_idx * n_genes;
 
-    // 3. Budowa wektora (crossover)
+    // KROK 1: Kopiujemy całego rodzica jako bazę.
+    // Dzięki temu nie musimy pisać "else trial[j] = p_curr[j]" dla genów niezmutowanych.
+    std::copy(p_curr, p_curr + n_genes, trial.begin());
+
+    // KROK 2: Zbieramy indeksy 'j', które w ogóle MOGĄ zostać zmutowane
+    std::vector<int> mutable_indices;
+    mutable_indices.reserve(n_genes); // Optymalizacja alokacji
     for (int j = 0; j < n_genes; ++j) {
         int gate_id = j % n_gates;
         int chron_time = gate_time_map[gate_id];
 
-        bool is_in_window = (chron_time >= w_start && chron_time < w_end);
-        bool is_executed_in_snapshot = gate_executed[gate_id]; // Odczyt O(1)
-        bool do_mutate = (j == R) || (dist_real(rng) < cr);
+        if (chron_time >= w_start && chron_time < w_end && !gate_executed[gate_id]) {
+            mutable_indices.push_back(j);
+        }
+    }
 
-        if (is_in_window && do_mutate && !is_executed_in_snapshot) {
-            trial[j] = std::clamp(p_a[j] + f * (p_b[j] - p_c[j]), 0.0, 1.0);
-        } else {
-            trial[j] = p_curr[j];
+    if (mutable_indices.empty()) {
+        return; // Brak genów do mutacji w oknie
+    }
+
+    // KROK 3: Wymuszona mutacja R (jeśli R jest w dozwolonych indeksach)
+    if (R != -1) {
+        trial[R] = std::clamp(p_a[R] + f * (p_b[R] - p_c[R]), 0.0, 1.0);
+    }
+
+    // KROK 4: Skoki geometryczne tylko po DOZWOLONYCH indeksach
+    if (cr > 0.0) {
+        std::geometric_distribution<int> geo_dist(cr);
+        int current_idx_in_mutable = geo_dist(rng); // Zwraca ilość porażek przed 1. sukcesem
+
+        while (current_idx_in_mutable < mutable_indices.size()) {
+            int j = mutable_indices[current_idx_in_mutable];
+
+            // Unikamy ponownego liczenia, jeśli trafiliśmy na to samo miejsce co R
+            if (j != R) {
+                trial[j] = std::clamp(p_a[j] + f * (p_b[j] - p_c[j]), 0.0, 1.0);
+            }
+
+            // Skaczemy do następnego sukcesu (dodajemy 1, żeby przejść za obecny sukces)
+            current_idx_in_mutable += geo_dist(rng) + 1;
         }
     }
 }
