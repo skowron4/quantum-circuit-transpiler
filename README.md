@@ -50,34 +50,7 @@ The compilation and optimization pipeline executes in six stages:
   `evaluate_fitness_impl` and `de_force_down` are templated on `<bool LOGGING, bool CAN_LAZY>` using `if constexpr` to strip `RoutingRecord` (40-byte struct) construction and vector pushes from the evolutionary hot path, enabling logging only during final schedule reconstruction. Binomial crossover in `generate_trial_vector_windowed` uses `__restrict` pointers and geometric distribution skipping (`std::geometric_distribution<int>(cr)`) to jump directly between mutated gene indices in O(CR * W) time rather than iterating over the full window W.
 - **Parallel Batch Evaluation & Qiskit Interoperability:**
   The batch evaluation harness parallelizes hyperparameter grid sweeps (`tune_hyperparameters`) and multi-circuit benchmarks via OpenMP (`#pragma omp parallel for schedule(dynamic, 1)`), using thread-local `std::ostringstream` buffers flushed under `#pragma omp critical`. A Python pipeline (`qiskitScript.py`) generates VQE, QAOA, Quantum Volume, and Shor proxy circuits, runs Qiskit's `sabre` transpiler (`optimization_level=0`, 20 trials), and exports JSON traces that C++ replays on the exact resonator timing model (`evaluate_qiskit_routed_circuit`) for direct baseline comparison.
-
-## Benchmarks & Results
-
-Benchmarks compare three routing pipelines evaluated under the identical resonator hardware timing model:
-- `qiskit_sabre_export_eval`: Qiskit SABRE transpiler output replayed with resonator MOVE/SWAP timing.
-- `sabre_fixed_layout`: Standalone bidirectional C++ `SabreRouter` (lookahead depth 20).
-- `dehybrid_sabre_fixed_layout`: `SabreDEHybridRouter` with windowed DE (`pop_size = 30`, `window_size = 500`, `accept_ratio = 0.7`, `F = 0.9`, `CR = 0.9`, lookahead depth 4).
-
-*Test environment: AMD RYZEN 7 5800x`, `16GB 3200MHz`, Windows x86_64, MSVC 14.44 (`/O2 /Ob2 /Oi /Ot /arch:AVX2 /fp:fast`, LTO enabled).*
-
-| Topology | Qubits (Q) | Gates (G) | Router | Routing Cost | SWAPs / MOVEs | Makespan | Wall Time (s) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Triangle (3 Res) | 13 | 500 | Qiskit SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Triangle (3 Res) | 13 | 500 | C++ SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Triangle (3 Res) | 13 | 500 | **DE+SABRE Hybrid** | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 3x3 (9 Res) | 30 | 2000 | Qiskit SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 3x3 (9 Res) | 30 | 2000 | C++ SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 3x3 (9 Res) | 30 | 2000 | **DE+SABRE Hybrid** | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 5x5 (25 Res) | 70 | 2000 | Qiskit SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 5x5 (25 Res) | 70 | 2000 | C++ SABRE | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-| Grid 5x5 (25 Res) | 70 | 2000 | **DE+SABRE Hybrid** | `[INSERT]` | `[INSERT]` | `[INSERT]` | `[INSERT]` |
-
-### Performance Metrics Summary
-- **Routing Cost Reduction:** `[INSERT: e.g., X.X% mean reduction]` in total routing cost (`SWAP_COST = 3.14`, `MOVE_COST = 1.0`) achieved by `SabreDEHybridRouter` over standalone SABRE across 216 benchmark circuits.
-- **Makespan & Depth Improvement:** `[INSERT: e.g., X.X% reduction]` in physical execution makespan via concurrent resonator scheduling and lazy off-boarding.
-- **Snapshot Windowing Speedup:** `[INSERT: e.g., X.Xx speedup]` in windowed DE evaluation time using `DEStateSnapshot` prefix resumption compared to full-circuit re-simulation.
-- **Evaluation Throughput:** `[INSERT: e.g., X,XXX fitness evaluations/sec]` at 2,000 gates on a 70-qubit (5x5 resonator) topology.
-
+  
 ## Build & Usage
 
 ### Prerequisites
