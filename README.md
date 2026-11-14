@@ -100,7 +100,7 @@ cmake --build build --config Release
 ### Execution
 
 1. **Generate Qiskit Benchmark Suite (Optional, for batch mode):**
-   Generates 216 benchmark circuits (5 to 70 qubits, 50 to 8,000 gates across VQE, QAOA, Quantum Volume, and Shor styles) along with Qiskit SABRE baseline routes in `iqm_benchmarks/`:
+   Generates 216 benchmark circuits (5 to 70 qubits, 50 to 2,000 gates across VQE, QAOA, Quantum Volume, and Shor styles) along with Qiskit SABRE baseline routes in `iqm_benchmarks/`:
 
 ```bash
 python qiskitScript.py
